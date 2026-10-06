@@ -352,7 +352,7 @@ function seed(){
 }
 
 /* ---------- state + saving ---------- */
-const APP_VERSION = "1.5";
+const APP_VERSION = "1.5.1";
 let state = null, saveTimer = null;
 const sync = { configured: false, user: null, fb: null, auth: null, db: null, docRef: null, unsub: null, base: null, household: null };
 let commitSeq = 0, flushing = false;
@@ -547,6 +547,7 @@ function cleanNutr(x){
 /* ---------- paste a recipe ---------- */
 function titleCase(t){ return t === t.toUpperCase() ? t.toLowerCase().replace(/(^|[\s(\/-])(\p{L})/gu, (m, a, c) => a + c.toUpperCase()).replace(/\b(With|And|Or|Of|The|A|In|On|For|To|En)\b(?!$)/g, w => w.toLowerCase()).replace(/^./, c => c.toUpperCase()) : t; }
 function cleanIngredient(l){
+  l = l.replace(/^(high[- ]smoke[- ]point|good[- ]quality|extra[- ]virgin),\s*/i, "");
   return l.replace(/\\/g, "").replace(/^[-•*▢☐□]\s*/, "").replace(/\([^)]*\)/g, " ")
     .replace(/\b(large|medium|small)\s+or\s+[\d½¼¾⅓⅔]+\s+(large|medium|small)\s+/i, "").replace(/,.*$/, "").replace(/\bplus more.*$/i, "").replace(/\s+/g, " ").trim();
 }
@@ -554,8 +555,11 @@ function parseRecipeText(text){
   text = splitTitleLine(text);
   const lines = String(text).replace(/\r/g, "").split("\n").map(l => l.replace(/\\/g, "").trim());
   const filled = lines.filter(Boolean);
-  let name = filled[0] || "";
-  if (/^(spring|summer|fall|winter)\s+\d{4}/i.test(name) && filled[1]) name = filled[1];
+  let ni = 0;
+  if (/^(spring|summer|fall|winter)\s+\d{4}/i.test(filled[0] || "") && filled[1]) ni = 1;
+  let name = filled[ni] || "";
+  // titles in capitals often wrap onto a second line: "JALAPEÑO CHEDDAR SKEWERS" / "WITH BAKED POTATOES"
+  while (name === name.toUpperCase() && filled[ni + 1] && filled[ni + 1] === filled[ni + 1].toUpperCase() && /[A-Z]{3}/.test(filled[ni + 1]) && !/^(INGREDIENTS|INSTRUCTIONS|MAKES|SERVES)\b/.test(filled[ni + 1])) { ni++; name += " " + filled[ni]; }
   name = titleCase(name.replace(/\s*-\s*Google Docs\s*$/i, ""));
   const sv = String(text).match(/\b(?:makes|serves|servings?:?)\s+(\d+)/i);
   const iIdx = lines.findIndex(l => /^ingredients\b/i.test(l));
@@ -744,7 +748,11 @@ function splitRecipes(text){
   lines.forEach((l, i) => {
     if (!isTitle(l)) return;
     const next = lines.slice(i + 1).filter(Boolean).slice(0, 3);
-    if (next.some(n => /^(makes|serves|yield)\b/i.test(n) || /^ingredients\b/i.test(n))) starts.push(i);
+    if (!next.some(n => /^(makes|serves|yield)\b/i.test(n) || /^ingredients\b/i.test(n))) return;
+    // a title wrapped onto two lines is one recipe, not two
+    const prev = starts[starts.length - 1];
+    if (prev != null && lines.slice(prev + 1, i).every(x => !x || isTitle(x))) return;
+    starts.push(i);
   });
   const chunks = starts.length ? starts.map((st, k) => lines.slice(st, starts[k + 1] ?? lines.length).join("\n")) : [lines.join("\n")];
   return chunks.map(parseRecipeText).filter(r => r.name && r.ingredients.length);
@@ -889,6 +897,25 @@ function repairRun(run, vocab){
   }
   return best[n].out.join(" ");
 }
+function repairNul(text, vocab){
+  // every \0 is a missing lowercase "a" or "g": pick the spelling that's a known word, else "a"
+  return String(text).replace(/[A-Za-zÀ-ÿ\0]*\0[A-Za-zÀ-ÿ\0]*/g, w => {
+    const holes = (w.match(/\0/g) || []).length;
+    if (holes > 8) return w.replace(/\0/g, "a");
+    let best = null;
+    for (let mask = 0; mask < (1 << holes); mask++) {
+      let k = 0; const cand = w.replace(/\0/g, () => (mask >> k++) & 1 ? "g" : "a");
+      const hit = (vocab.get(skel(cand)) || new Map()).get(cand.toLowerCase());
+      const score = (hit || 0) * 10 - (mask ? (mask.toString(2).match(/1/g) || []).length : 0);
+      if (!best || score > best.score) best = {score, cand};
+    }
+    return best.cand;
+  });
+}
+function fixText(text, vocab){
+  if (/\0/.test(text)) return repairNul(text, vocab);
+  return looksGarbled(text) ? repairText(text, vocab) : text;
+}
 function repairText(text, vocab){
   return String(text).split("\n").map(line =>
     line.replace(/[A-Za-zÀ-ÿ](?:[A-Za-zÀ-ÿ ]*[A-Za-zÀ-ÿ])?/g, run => {
@@ -899,7 +926,7 @@ function repairText(text, vocab){
 }
 
 const LIST_FOLDER = /^(printable menu|prep list|(free )?grocery list|consolidated lists?|consolidated recipes|all consolidated|all documents|recipe pdfs?)/i;
-const STAPLE_RX = /\b(oil|vinegar|salt|pepper\b(?! jack)|black pepper|flour|sugar|honey|soy sauce|bouillon|yeast|powder|paprika|cumin|oregano|chili flakes|red chili|cinnamon|cornstarch|corn starch|baking (soda|powder)|worcestershire|dijon|mustard powder|maple syrup|mayonnaise|vanilla|sesame oil|fish sauce|garlic powder|onion powder|spices?)\b/i;
+const STAPLE_RX = /\b(oil|vinegar|salt|(black|white|cayenne|ground|cracked|lemon) pepper|peppercorns?|seasoning|cayenne|flour|sugar|honey|soy sauce|bouillon|yeast|powder|paprika|cumin|oregano|chili flakes|red chili|cinnamon|cornstarch|corn starch|baking (soda|powder)|worcestershire|dijon|mustard powder|maple syrup|mayonnaise|vanilla|sesame oil|fish sauce|garlic powder|onion powder|spices?)\b/i;
 function cleanItemName(s){
   return s.replace(/\\/g, "").replace(/^\+\s*/, "").replace(/\[[^\]]*\]/g, "").replace(/\((optional|or [^)]*)\)/gi, "").replace(/^\+\s*/, "").replace(/^(Fats|Other|Essentials)(?=[A-Z])/, "").replace(/\s+/g, " ").trim();
 }
@@ -928,8 +955,16 @@ function parseKey(text){
   }
   return key;
 }
-function parseLists(text){
-  const lines = String(text).replace(/\r/g, "").split("\n").map(l => l.replace(/\\/g, "").trim());
+const PREP_VERB = /^(Prep|Preheat|Pre-heat|Toast|Bake|Roast|Cook|Boil|Simmer|Slice|Dice|Chop|Mince|Grate|Shred|Make|Marinate|Mix|Combine|Whisk|Blend|Cut|Wash|Peel|Thaw|Defrost|Soak|Brine|Season|Set|Place|Pickle|Fry|Sear|Grill|Steam|Rinse|Drain|Trim|Portion|Store|Transfer|Remove|Start|Heat|Prepare|Assemble|Divide|Form|Roll|Shape)\b/;
+const CHECKBOX = /^[□☐☑☒▢◻◽⬜❑❒■▪○◯●•\uF000-\uF8FF]\s*/;
+function notGrocery(name){ return PREP_VERB.test(name) || /\b(see PDF|minutes|oven to|º|°F|timer|refrigerator|keep ingredient)\b/i.test(name) || name.split(/\s+/).length > 9; }
+function parseLists(text, kind = "mixed"){
+  let lines = String(text).replace(/\r/g, "").split("\n").map(l => l.replace(/\\/g, "").trim()).map(l => l.replace(CHECKBOX, m => "□ "));
+  if (kind === "menu") return {key: parseKey(text), prep: [], grocery: [], menuLines: lines.filter(Boolean)};
+  if (kind === "grocery") lines = lines.map(l => l.replace(/^□\s*/, ""));
+  // A prep list without checkboxes: a line starting with a cooking verb starts a new step.
+  const hasBoxes = lines.some(l => /^□/.test(l));
+  let inPrep = kind === "prep", afterHeading = false;
   const key = parseKey(text);
   const prep = [], grocery = [];
   let cur = null, essential = false, inMenu = false, menuLines = [];
@@ -939,10 +974,15 @@ function parseLists(text){
     const l = lines[i];
     if (!l) continue;
     if (/^ESSENTIALS/i.test(l) || /^Essentials$/i.test(l)) { essential = true; continue; }
-    if (/^GROCERY LIST/i.test(l)) { essential = false; cur = null; continue; }
-    if (/^PREP LIST/i.test(l)) { cur = null; continue; }
+    if (/^GROCERY LIST/i.test(l)) { essential = false; cur = null; if (kind !== "prep") inPrep = false; continue; }
+    if (/^PREP LIST/i.test(l)) { cur = null; inPrep = true; continue; }
+    if (/^THIS WEEK.?S MENU/i.test(l) && kind === "mixed") { inPrep = false; cur = null; continue; }
+    if (inPrep && !hasBoxes && kind !== "grocery" && PREP_VERB.test(l) && !/^[¹²³⁴⁵⁶⁷⁸⁹]/.test(l)) {
+      cur = {text: l, detail: []}; prep.push(cur); continue;
+    }
     if (/^(Additional Meals|Leftovers)/i.test(l)) { essential = "extra"; continue; }
     if (/^□/.test(l)) {
+      afterHeading = false;
       cur = {text: l.replace(/^□\s*/, ""), detail: []};
       // join wrapped line: no superscript at the end and the next line continues it
       const open = t => (t.match(/\(/g) || []).length > (t.match(/\)/g) || []).length || (t.match(/‘/g) || []).length > (t.match(/’/g) || []).length;
@@ -952,7 +992,7 @@ function parseLists(text){
       }
       prep.push(cur); continue;
     }
-    if (isKeyLine(l) || isHeading(l)) { cur = null; continue; }
+    if (isKeyLine(l) || isHeading(l)) { cur = null; afterHeading = true; continue; }
     if (cur && !/^(Produce|Dairy|Shelf|Suggested|Proteins|Cheeses|Frozen|Nuts|Alcohol|Bakery|Meat|Pantry)\b/.test(l)) {
       // everything under a □ task until the next heading belongs to that task
       if (cur.detail.length && !/[¹²³⁴⁵⁶⁷⁸⁹)]\s*$/.test(cur.detail[cur.detail.length - 1]) && !/^How To/i.test(l) && /^[a-z(]/.test(l)) cur.detail[cur.detail.length - 1] += " " + l;
@@ -969,10 +1009,11 @@ function parseLists(text){
     }
     if (cur && !/[¹²³⁴⁵⁶⁷⁸⁹]/.test(l) && cur.detail.length && !/\)$/.test(cur.detail[cur.detail.length - 1])) { cur.detail[cur.detail.length - 1] += " " + l; continue; }
     // grocery items end with recipe numbers: "Garlic (3 cloves)¹²³ Russet Potatoes (2 lbs)²³"
+    if (kind === "prep") { if (prep.length && !afterHeading) prep[prep.length - 1].detail.push(l); continue; }
     if (/[¹²³⁴⁵⁶⁷⁸⁹]/.test(l)) {
       cur = null;
       for (const m of l.matchAll(/([^¹²³⁴⁵⁶⁷⁸⁹]+?)\s*([¹²³⁴⁵⁶⁷⁸⁹]+)/g)) {
-        const it = parseGroceryItem(m[1]); if (!it) continue;
+        const it = parseGroceryItem(m[1]); if (!it || notGrocery(it.name)) continue;
         it.tags = supToNums(m[2]);
         it.essential = essential === true || STAPLE_RX.test(it.name);
         it.extra = essential === "extra";
@@ -1002,7 +1043,16 @@ function similarity(a, b){
   const inter = [...ta].filter(x => tb.has(x)).length;
   return inter / Math.max(1, Math.min(ta.size, tb.size)) * 0.85;
 }
-function matchMenu(menuLines, recipes){
+function matchMenu(rawLines, recipes){
+  // join wrapped titles ("Cheddar Chive Mashed Potatoes" + "with Chicken Cutlets…") and wrapped descriptions
+  const menuLines = [];
+  for (const l of rawLines) {
+    const prev = menuLines[menuLines.length - 1];
+    const isDesc = s => /^[a-zà-ÿ(]/.test(s) || (s.match(/,/g) || []).length >= 2;
+    if (prev != null && /^(with|&|and)\b/i.test(l) && !isDesc(prev)) menuLines[menuLines.length - 1] = prev + " " + l;
+    else if (prev != null && isDesc(prev) && /^[a-zà-ÿ(]/.test(l)) menuLines[menuLines.length - 1] = prev + " " + l;
+    else menuLines.push(l);
+  }
   const out = [];
   for (let i = 0; i < menuLines.length; i++) {
     const l = menuLines[i];
@@ -1187,14 +1237,25 @@ async function importMenu(folder, extraFiles, vocab, step){
     for (const t of consolidatedRecipes) for (const r of splitRecipes(t)) if (!recipes.some(x => similarity(x.name, r.name) > 0.8)) recipes.push(r);
   }
   for (const t of consolidatedRecipes) addWords(vocab, t, 2);
+  recipes.forEach(r => { r.name = fixText(r.name, vocab); r.ingredients.forEach(i => { i.name = fixText(i.name, vocab); }); r.steps = fixText(r.steps || "", vocab); });
   recipes.forEach(r => addWords(vocab, r.name, 6));
   // Prefer the separate menu / prep / grocery files; use the consolidated list when they're missing.
   const pick = rx => Object.entries(listTexts).filter(([k]) => rx.test(k)).flatMap(([, v]) => v);
   let texts = [...pick(/printable menu/), ...pick(/prep list/), ...pick(/grocery/)];
   if (!pick(/prep list/).length || !pick(/grocery/).length) texts = [...texts, ...pick(/consolidated lists?|loose/)];
   if (!texts.length && consolidatedRecipes.length) texts = consolidatedRecipes.filter(t => /PREP LIST|GROCERY LIST/.test(t));
-  const fixed = texts.map(t => looksGarbled(t) ? repairText(t, vocab) : t).join("\n\n");
-  const L = parseLists(fixed);
+  const kindOf = name => /printable menu/.test(name) ? "menu" : /prep list/.test(name) ? "prep" : /grocery/.test(name) ? "grocery" : "mixed";
+  let sources = Object.entries(listTexts).flatMap(([name, arr]) => arr.map(t => ({kind: kindOf(name), text: fixText(t, vocab)})));
+  const has = k => sources.some(x => x.kind === k);
+  if (has("prep") && has("grocery")) sources = sources.filter(x => x.kind !== "mixed" || !has("menu"));
+  if (!sources.length && consolidatedRecipes.length) sources = consolidatedRecipes.filter(t => /PREP LIST|GROCERY LIST/.test(t)).map(t => ({kind: "mixed", text: fixText(t, vocab)}));
+  const parts = sources.map(x => parseLists(x.text, x.kind));
+  const pickP = (k, field) => { const own = sources.map((x, i) => x.kind === k ? parts[i][field] : []).flat(); return own.length ? own : sources.map((x, i) => x.kind === "mixed" ? parts[i][field] : []).flat(); };
+  const seenG = new Set();
+  const L = {key: Object.assign({}, ...parts.map(x => x.key)), prep: pickP("prep", "prep"),
+    grocery: pickP("grocery", "grocery").filter(g => { const k = norm(g.name); if (seenG.has(k)) return false; seenG.add(k); return true; }),
+    menuLines: pickP("menu", "menuLines")};
+  texts = sources.map(x => x.text);
   // which recipes are the week's meals
   const menuItems = matchMenu(L.menuLines, recipes);
   const mains = new Map(menuItems.map(m => [m.idx, m.desc]));
@@ -1245,11 +1306,15 @@ function copyLibRecipe(m, i){
   if (!mine) { mine = {id: uid(), name: r.name, time: r.time || "", servings: r.servings || null, ingredients: clone(r.ingredients || []), steps: r.steps || "", cat: r.cat || guessCat(r.name), prep: "", lib: key, fromMenu: m.name}; state.recipes.push(mine); }
   return mine;
 }
-function needForRecipes(counts){
+function needForRecipes(counts, opts = {}){
   const need = {};
+  const made = Object.keys(counts).map(recipeById).filter(Boolean);
   for (const [rid, n] of Object.entries(counts)) {
     const times = n - portionsFor(rid); if (times <= 0) continue;
     for (const ing of recipeById(rid).ingredients) { if (STAPLES.has(ing.name.toLowerCase()) || STAPLES.has(norm(ing.name))) continue;
+      // sauces and components you're making yourself aren't bought
+      if (made.some(r => r.id !== rid && similarity(r.name, ing.name) > 0.85) || /^(croutons|homemade)/i.test(ing.name)) continue;
+      if (!opts.staples && STAPLE_RX.test(ing.name)) continue;
       const key = norm(ing.name) + "|" + ing.unit; (need[key] ||= {name: ing.name, unit: ing.unit, qty: 0}).qty += ing.qty * times; } }
   const short = [];
   for (const n of Object.values(need)) { const p = findPantry(n.name);
@@ -1270,16 +1335,33 @@ function useMenu(m, o){
       groc = addToGrocery(toAdd.map(g => ({name: g.name, qty: g.qty, unit: g.unit})));
     } else {
       const counts = {}; ids.forEach(id => { counts[id] = (counts[id] || 0) + 1; });
-      groc = addToGrocery(needForRecipes(counts));
+      groc = addToGrocery(needForRecipes(counts, {staples: o.staples}));
     }
   }
+  const tasks = [];
   if (o.prep && m.prep.length) {
     const have = new Set((state.prep[wk] || []).map(t => t.text.toLowerCase()));
-    const tasks = m.prep.filter(t => !have.has(t.text.toLowerCase())).map(t => ({id: uid(), text: t.text, detail: t.detail || [], for: t.for || m.name, night: NIGHT_BEFORE.test(t.text + " " + (t.detail || []).join(" ")), done: false}));
-    (state.prep[wk] ||= []).push(...tasks); prep = tasks.length;
+    tasks.push(...m.prep.filter(t => !have.has(t.text.toLowerCase())).map(t => ({id: uid(), text: t.text, detail: t.detail || [], for: t.for || m.name, night: NIGHT_BEFORE.test(t.text + " " + (t.detail || []).join(" ")), recipes: [], done: false})));
   }
+  let comps = 0;
+  if (o.components) {
+    const mainNames = m.recipes.filter(r => r.main);
+    m.recipes.forEach((r, i) => {
+      if (r.main) return;
+      const link = {id: ids[i], name: r.name};
+      // attach to the prep step that already says to make it ("see PDF ‘Honey Mustard Sauce’")
+      const mentions = t => [t.text, ...(t.detail || [])].some(x => similarity(x.replace(/\(see[^)]*\)/i, ""), r.name) > 0.85 || new RegExp("‘" + r.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "’", "i").test(x));
+      const t = tasks.find(mentions) || (state.prep[wk] || []).find(mentions);
+      if (t) { (t.recipes ||= []).some(x => x.id === link.id) || t.recipes.push(link); comps++; return; }
+      const usedBy = mainNames.filter(mr => (mr.ingredients || []).some(ing => similarity(ing.name, r.name) > 0.8)).map(mr => mr.name);
+      if ((state.prep[wk] || []).some(x => x.text.toLowerCase() === ("make " + r.name).toLowerCase())) return;
+      tasks.push({id: uid(), text: `Make ${r.name}`, detail: [], for: usedBy.join(", ") || m.name, night: NIGHT_BEFORE.test(r.name), recipes: [link], done: false});
+      comps++;
+    });
+  }
+  if (tasks.length) { (state.prep[wk] ||= []).push(...tasks); prep = tasks.length; }
   (state.weekMenus ||= {})[wk] = [...new Set([...(state.weekMenus[wk] || []), m.name])];
-  return {planned, groc, inStock, prep, recipes: ids.length};
+  return {planned, groc, inStock, prep, comps, recipes: ids.length};
 }
 
 /* ---------- backup ---------- */
@@ -1522,7 +1604,7 @@ function renderPrepCard(){
   if (ready.length) h += `<div class="readyrow">${ready.map(p => `<span class="chip ${!isFreezer(p.loc) && ageDays(p.made) >= 4 ? "warn" : "ok"}">${esc(p.name)} · ${p.portions}</span>`).join("")}</div>`;
   if (tasks.length) h += `<ul class="tasks">` + tasks.map(t => `<li class="${t.done ? "done" : ""}">
       <button class="check ${t.done ? "on" : ""}" data-act="task-toggle" data-id="${t.id}" aria-label="${t.done ? "Mark not done" : "Mark done"}: ${esc(t.text)}">${I.tick}</button>
-      <div class="grow"><div class="name">${esc(t.text)}</div>${t.for ? `<div class="sub">${esc(t.for)}</div>` : ""}${t.detail && t.detail.length && !t.done ? `<details class="more"><summary>${t.detail.length} step${t.detail.length === 1 ? "" : "s"}</summary><ul class="detail">${t.detail.map(d => `<li>${esc(d)}</li>`).join("")}</ul></details>` : ""}
+      <div class="grow"><div class="name">${esc(t.text)}</div>${t.for ? `<div class="sub">${esc(t.for)}</div>` : ""}${(t.recipes || []).length && !t.done ? `<div class="readyrow" style="margin:6px 0 0">${t.recipes.filter(x => recipeById(x.id)).map(x => `<button class="chip loc" data-act="open-r" data-id="${x.id}" style="font-size:13px;padding:5px 10px">${esc(x.name)} ›</button>`).join("")}${t.recipes.length === 1 && recipeById(t.recipes[0].id) ? `<button class="btn small" data-act="task-make" data-id="${t.id}">Make it</button>` : ""}</div>` : ""}${t.detail && t.detail.length && !t.done ? `<details class="more"><summary>${t.detail.length} step${t.detail.length === 1 ? "" : "s"}</summary><ul class="detail">${t.detail.map(d => `<li>${esc(d)}</li>`).join("")}</ul></details>` : ""}
         ${(t.night || t.batch) && !t.done ? `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">${t.night ? `<span class="chip warn">Night before</span>` : ""}${t.batch ? `<button class="btn small" data-act="task-batch" data-id="${t.id}">Cook &amp; portion</button>` : ""}</div>` : ""}</div>
       <button class="x" data-act="task-del" data-id="${t.id}" aria-label="Remove ${esc(t.text)}">×</button></li>`).join("") + `</ul>`;
   else h += `<p class="hint" style="margin:6px 0 4px">Plan meals below, then tap <b>Suggest prep</b> for a checklist of what to do ahead: marinades, sauces, chopping, grains and batch cooking.</p>`;
@@ -1689,7 +1771,8 @@ function renderSheet(){
       <div class="toggle" style="justify-content:space-between;padding-top:0"><span>Making <b class="num">${serv}</b> serving${serv === 1 ? "" : "s"}${f !== 1 ? ` <span class="sub">(× ${fmtQty(f)})</span>` : ""}</span><div class="stepper"><button data-act="serv-dec" aria-label="Fewer servings">−</button><span class="num">${serv}</span><button data-act="serv-inc" aria-label="More servings">+</button></div></div>
       <ul class="ing">${r.ingredients.map(i => { const si = {...i, qty: Math.round(i.qty * f * 100) / 100}, st = ingStatus(si);
         const note = st.k==="have" ? `have ${qtyStr(st.p.qty, st.p.unit)}` : st.k==="low" ? `only ${qtyStr(st.p.qty, st.p.unit)}` : st.k==="miss" ? "not in stock" : "staple";
-        return `<li><span class="dot ${st.k}"></span><div class="grow"><span class="num">${esc(qtyStr(si.qty,si.unit))}</span> ${esc(i.name)}</div><span class="sub">${esc(note)}</span></li>`; }).join("")}</ul>
+        const sub = state.recipes.find(x => x.id !== r.id && x.cat !== "Main" && similarity(x.name, i.name) > 0.85);
+        return `<li><span class="dot ${st.k}"></span><div class="grow"><span class="num">${esc(qtyStr(si.qty,si.unit))}</span> ${sub ? `<button class="linkname" data-act="open-r" data-id="${sub.id}" style="color:var(--accent);font-weight:700">${esc(i.name)} ›</button>` : esc(i.name)}</div><span class="sub">${esc(sub && portionsFor(sub.id) ? `${portionsFor(sub.id)} prepped` : note)}</span></li>`; }).join("")}</ul>
       <label class="field">My notes<textarea id="rNotes" data-id="${r.id}" style="min-height:64px" placeholder="Double the sauce, use thighs instead of breasts…">${esc(r.notes || "")}</textarea></label>
       ${r.steps ? `<div class="steps">${esc(r.steps)}</div>` : ""}
       ${r.prep ? `<div class="section-h" style="margin-top:0"><h2>Prep ahead</h2></div><ul class="ing">${r.prep.split("\n").filter(l => l.trim()).map(l => `<li><span class="dot staple"></span><div class="grow">${esc(l)}</div>${NIGHT_BEFORE.test(l) ? `<span class="chip warn">Night before</span>` : ""}</li>`).join("")}</ul>` : ""}
@@ -1775,9 +1858,11 @@ function renderSheet(){
       <label class="toggle"><input type="checkbox" id="luPlan" checked> Plan the ${mains} meal${mains === 1 ? "" : "s"}, one a day</label>
       <div class="two-col"><label class="field">Starting<select id="luDay">${days.map((d, i) => `<option value="${i}">${d}</option>`).join("")}</select></label><label class="field">As<select id="luMeal"><option value="dinner">Dinner</option><option value="lunch">Lunch</option></select></label></div>
       <label class="toggle"><input type="checkbox" id="luGroc" checked> Add the grocery list ${items.length ? `(${items.length - staples} items)` : "(built from the recipes)"}</label>
-      ${staples ? `<label class="toggle" style="padding-left:30px"><input type="checkbox" id="luStaples"> Include ${staples} pantry staples (oils, spices, salt…)</label>` : ""}
+      ${staples || !items.length ? `<label class="toggle" style="padding-left:30px"><input type="checkbox" id="luStaples"> Include pantry staples (oils, spices, salt…)</label>` : ""}
       ${items.length ? `<label class="toggle" style="padding-left:30px"><input type="checkbox" id="luSkip" checked> Skip items already in my pantry</label>` : ""}
       ${m.prep.length ? `<label class="toggle"><input type="checkbox" id="luPrep" checked> Add the ${m.prep.length}-step prep list to Meal prep</label>` : ""}
+      ${m.recipes.some(r => !r.main) ? `<label class="toggle"><input type="checkbox" id="luComp" checked> Add the sauces &amp; components to Meal prep</label>
+        <p class="hint" style="margin:-6px 0 10px 30px">${m.recipes.filter(r => !r.main).map(r => esc(r.name)).join(", ")}</p>` : ""}
       <div class="actions"><button class="btn" type="submit">Add to my week</button><button class="btn plain" type="button" data-act="lib-back-menu">Back</button></div></form>`;
   }
   if (s.type === "libRecipe") {
@@ -1812,7 +1897,7 @@ function renderSheet(){
     body = `<h2>Prep day plan</h2><div class="meta">${tl.steps.length ? `About <b>${durText(tl.total)}</b>. Long hands-off jobs start first, and hands-on jobs fit in while they cook.` : "All prep tasks are done."}</div>
       <div class="timers" id="timers">${timersHtml()}</div>
       <div>${tl.steps.map(x => `<div class="tl-step ${x.t.done ? "done" : ""}"><div class="tl-time">${clockText(x.start)}</div>
-        <div class="grow"><div class="name">${esc(x.t.text)}</div>${x.t.for ? `<div class="sub">${esc(x.t.for)}</div>` : ""}${x.t.detail && x.t.detail.length ? `<ul class="detail">${x.t.detail.map(d => `<li>${esc(d)}</li>`).join("")}</ul>` : ""}
+        <div class="grow"><div class="name">${esc(x.t.text)}</div>${x.t.for ? `<div class="sub">${esc(x.t.for)}</div>` : ""}${(x.t.recipes || []).length ? `<div class="readyrow" style="margin:6px 0 0">${x.t.recipes.filter(r => recipeById(r.id)).map(r => `<button class="chip loc" data-act="open-r" data-id="${r.id}" style="font-size:13px;padding:5px 10px">${esc(r.name)} ›</button>`).join("")}</div>` : ""}${x.t.detail && x.t.detail.length ? `<ul class="detail">${x.t.detail.map(d => `<li>${esc(d)}</li>`).join("")}</ul>` : ""}
         <div class="sub">${x.active} min hands-on${x.passive ? ` · ${durText(x.passive)} cooking` : ""}${x.note ? ` · ${esc(x.note)}` : ""}</div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">${x.passive ? `<button class="btn small ghost" data-act="timer-go" data-l="${esc(x.t.text)}" data-min="${x.passive}">Start ${durText(x.passive)} timer</button>` : ""}${x.t.batch ? `<button class="btn small" data-act="task-batch" data-id="${x.t.id}">Cook &amp; portion</button>` : ""}${x.t.id !== "pack" ? `<button class="btn small plain" data-act="tl-done" data-id="${x.t.id}">Mark done</button>` : ""}</div></div></div>`).join("")}</div>
       <form class="addbar" data-form="timer" style="margin-top:12px"><input id="tmMin" type="number" inputmode="numeric" min="1" placeholder="Custom timer (minutes)" aria-label="Custom timer minutes"><button class="btn ghost" type="submit">Start</button></form>
@@ -2031,11 +2116,11 @@ document.addEventListener("submit", e => {
   if (f === "libuse") {
     const s = ui.sheet, m = LIB.menus[s.id], ws = new Date($("#luWeek").value + "T12:00:00");
     const o = {weekStart: mondayOf(ws), plan: $("#luPlan").checked, startDay: +$("#luDay").value, meal: $("#luMeal").value, grocery: $("#luGroc").checked,
-      staples: !!($("#luStaples") && $("#luStaples").checked), ignorePantry: !!($("#luSkip") && !$("#luSkip").checked), prep: !!($("#luPrep") && $("#luPrep").checked)};
+      staples: !!($("#luStaples") && $("#luStaples").checked), ignorePantry: !!($("#luSkip") && !$("#luSkip").checked), prep: !!($("#luPrep") && $("#luPrep").checked), components: !!($("#luComp") && $("#luComp").checked)};
     undoSnap = clone(state);
     const res = useMenu(m, o);
     ui.sheet = null; ui.tab = "plan"; ui.weekStart = o.weekStart; window.scrollTo(0, 0);
-    commit(); toast([`${m.name} added`, res.planned ? `${res.planned} meals planned` : "", res.groc ? `${res.groc} on your list` : "", res.inStock ? `${res.inStock} already in stock` : "", res.prep ? `${res.prep} prep steps` : ""].filter(Boolean).join(" · "), true);
+    commit(); toast([`${m.name} added`, res.planned ? `${res.planned} meals planned` : "", res.groc ? `${res.groc} on your list` : "", res.inStock ? `${res.inStock} already in stock` : "", res.prep ? `${res.prep} prep steps` : "", res.comps ? `${res.comps} sauces & components linked` : ""].filter(Boolean).join(" · "), true);
     return;
   }
   if (f === "share") { startSharing($("#shareEmail").value); return; }
@@ -2187,6 +2272,7 @@ document.addEventListener("click", e => {
     case "lib-use-open": openSheet({type: "libUse", id: s.id, week: ymd(ui.weekStart), prev: s.prev}); break;
     case "lib-import-open": openSheet(IMP.running && IMP.sheet ? IMP.sheet : {type: "libImport"}); break;
     case "lib-import-stop": IMP.stop = true; renderSheet(); break;
+    case "task-make": { const t = (state.prep[weekKey()] || []).find(x => x.id === id); if (t && t.recipes && t.recipes[0]) startCook(t.recipes[0].id, {batch: true, taskId: t.id}); break; }
     case "week-tools": openSheet({type: "week"}); break;
     case "copy-last": { const n = copyWeekInto(daysOf(addDays(ui.weekStart, -7))); ui.sheet = null; commit(n ? `Copied ${n} meal${n === 1 ? "" : "s"} from last week` : "Those meals are already planned"); break; }
     case "rot-use": { const rt = (state.rotations || []).find(x => x.id === id); if (rt) { const n = copyWeekInto(rt.days); ui.sheet = null; commit(`Added ${n} meal${n === 1 ? "" : "s"} from "${rt.name}"`); } break; }
