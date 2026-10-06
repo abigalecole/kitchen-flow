@@ -196,6 +196,14 @@ label.field textarea{min-height:120px;resize:vertical}
 .tl-step.done .name{text-decoration:line-through;color:var(--muted)}
 #timerBar{position:fixed;left:0;right:0;bottom:calc(64px + env(safe-area-inset-bottom,0px));z-index:9;max-width:640px;margin:0 auto;padding:0 16px 6px}
 .timerbar-btn{width:100%;border:0;background:transparent;padding:0;text-align:left;display:grid;gap:4px}
+.more{margin-top:4px;font-size:14px}
+.more summary{color:var(--accent);font-weight:700;cursor:pointer;padding:2px 0}
+.detail{margin:4px 0 0;padding-left:18px;font-size:14px;color:var(--muted)}
+.detail li{margin:2px 0}
+.seg{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px}
+.seg button{border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:9px;font-weight:700}
+.seg button[aria-pressed="true"]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.loglist{font-size:13px;color:var(--muted);max-height:160px;overflow:auto;margin:6px 0 10px;padding-left:18px}
 .gear{border:0;background:transparent;color:var(--muted);width:36px;height:36px;border-radius:10px;display:grid;place-items:center;padding:0}
 .top-right{display:flex;align-items:center;gap:6px}
 #auth{position:fixed;inset:0;z-index:40;background:var(--bg);overflow:auto;padding:calc(40px + env(safe-area-inset-top,0px)) 20px 40px}
@@ -344,7 +352,7 @@ function seed(){
 }
 
 /* ---------- state + saving ---------- */
-const APP_VERSION = "1.4";
+const APP_VERSION = "1.5";
 let state = null, saveTimer = null;
 const sync = { configured: false, user: null, fb: null, auth: null, db: null, docRef: null, unsub: null, base: null, household: null };
 let commitSeq = 0, flushing = false;
@@ -537,12 +545,13 @@ function cleanNutr(x){
 }
 
 /* ---------- paste a recipe ---------- */
-function titleCase(t){ return t === t.toUpperCase() ? t.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()) : t; }
+function titleCase(t){ return t === t.toUpperCase() ? t.toLowerCase().replace(/(^|[\s(\/-])(\p{L})/gu, (m, a, c) => a + c.toUpperCase()).replace(/\b(With|And|Or|Of|The|A|In|On|For|To|En)\b(?!$)/g, w => w.toLowerCase()).replace(/^./, c => c.toUpperCase()) : t; }
 function cleanIngredient(l){
   return l.replace(/\\/g, "").replace(/^[-•*▢☐□]\s*/, "").replace(/\([^)]*\)/g, " ")
     .replace(/\b(large|medium|small)\s+or\s+[\d½¼¾⅓⅔]+\s+(large|medium|small)\s+/i, "").replace(/,.*$/, "").replace(/\bplus more.*$/i, "").replace(/\s+/g, " ").trim();
 }
 function parseRecipeText(text){
+  text = splitTitleLine(text);
   const lines = String(text).replace(/\r/g, "").split("\n").map(l => l.replace(/\\/g, "").trim());
   const filled = lines.filter(Boolean);
   let name = filled[0] || "";
@@ -560,13 +569,13 @@ function parseRecipeText(text){
     if (prev != null && (prev.match(/\(/g) || []).length > (prev.match(/\)/g) || []).length) out[out.length - 1] = prev + " " + l;
     else out.push(l);
     return out; }, []);
-  const ingredients = ingRaw.filter(l => l && !/:$/.test(l) && !/^(makes|serves)\b/i.test(l) && !/^\*/.test(l) && !/prepped ahead|^notes?\b/i.test(l))
+  const ingredients = ingRaw.filter(l => l && !/:$/.test(l) && !(l === l.toUpperCase() && /[A-Z]{3}/.test(l)) && !/^(makes|serves)\b/i.test(l) && !/^\*/.test(l) && !/prepped ahead|^notes?\b/i.test(l))
     .map(cleanIngredient).filter(l => l.length > 1).map(l => { const p = parseLine(l); p.name = p.name.toLowerCase(); return p; }).filter(p => p.name);
   let stepLines = sIdx >= 0 ? lines.slice(sIdx + 1).filter(Boolean) : [];
   if (stepLines.some(l => /^\d+[.)]\s/.test(l))) stepLines = stepLines.reduce((out, l) => {
     if (/^\d+[.)]\s/.test(l) || !out.length || /^[A-Z][A-Z ]+:?$/.test(l)) out.push(l); else out[out.length - 1] += " " + l;
     return out; }, []);
-  const steps = stepLines.join("\n");
+  const steps = stepLines.join("\n").replace(/\s(\d{1,2})\.\s(?=[A-Z])/g, "\n$1. ").replace(/ +([,.])/g, "$1");
   return { name, servings: sv ? +sv[1] : null, time: "", ingredients, steps };
 }
 
@@ -727,8 +736,9 @@ async function pdfText(buf){
   return out;
 }
 const isTitle = l => l.length > 4 && /[A-Z]{3}/.test(l) && l === l.toUpperCase() && !/^[\d½¼¾⅓⅔]/.test(l) && !/^(INGREDIENTS|INSTRUCTIONS|DIRECTIONS|NOTES?|TO COOK|STEPS)\b/.test(l);
+const splitTitleLine = t => String(t).replace(/^([^a-z\n]{4,}?)\s+((?:Makes|Serves|Yield)\b[^\n]*)$/gm, "$1\n$2");
 function splitRecipes(text){
-  const lines = String(text).replace(/\r/g, "").split("\n").map(l => l.replace(/\s+/g, " ").trim())
+  const lines = splitTitleLine(text).replace(/\r/g, "").split("\n").map(l => l.replace(/\s+/g, " ").trim())
     .filter(l => !/google docs\s*$|^\d+\s*\/\s*\d+$|^https?:\/\/|^\d{1,2}\/\d{1,2}\/\d{2,4}/i.test(l));
   const starts = [];
   lines.forEach((l, i) => {
@@ -824,6 +834,452 @@ async function driveSaveAll(){
     }
     s.busy = false; s.msg = `Saved ${done} recipes to the "${FOLDER_NAME}" folder in your Drive.`; s.err = false; commit();
   } catch (e) { if (done) commit(); sheetMsg((e.msg || "Couldn't save to Google Drive.") + (done ? ` ${done} saved before it stopped.` : ""), true); }
+}
+
+/* ---------- menu library: text repair + list parsing ---------- */
+// Some printable PDFs lose every "a" and "g" (they come out as spaces). Real word breaks
+// always survive as spaces, so we rebuild words by matching their "skeleton" (the word
+// without a/g) against words seen in clean text from the same menu.
+const SUP = "⁰¹²³⁴⁵⁶⁷⁸⁹";
+const supToNums = s => [...String(s || "")].map(c => SUP.indexOf(c)).filter(n => n > 0);
+const skel = w => String(w || "").toLowerCase().replace(/[ag]/g, "");
+const BASE_WORDS = `a about add added again all allow alongside also an and any are as at avocado baby bag bake baked baking balsamic basil batch be bean beans beef before bell best blend blender board boil bowl bowls bread breadcrumbs breast breasts broccoli brown bulb bunch burger butter cabbage can cans carrot carrots cast cheddar cheese chicken chili chips chives chop chopped cilantro clove cloves coconut cook cooked cooking corn cream crispy crumbs cucumber cumin cup cups cut cutlets dairy diced dijon dill dough dressing dried dry each egg eggs essentials extra fajita fats fillets flakes flaky for french fresh fridge frozen garlic gem ginger glaze golden grain grains grate grated green greens grill grilled ground half heat heavy herb herbs high honey hot in ingredient ingredients into iron is it italian jalapeño jalapeños juice keep kale kebab knob large later leftover lemon lettuce lime little loaf low maple marinade marinate marinated mayo meal meals meatball meatballs medium menu milk minutes mix mixing mustard neutral note notes of off oil olive on onion onions or orange oregano out oven package pan pancakes panko panzanella paprika parmesan parsley pasta peel peeled pepper peppers pickled pieces pinch pizza place plate potato potatoes powder preheat prep produce protein proteins pulse quinoa red refrigerator remaining rice roast roasted rolls rosemary russet salad salmon salsa salt sandwich sauce sauces sausage sauteed scallions scraps season see serrano set shallot shallots sharp sheet shelf shred shredded shrimp side sized skewers skillet slice sliced small smoked sour spices spinach squash stable steak stock store style subs sugar summer sweet the thinly this thyme time timer to toast toasted tomato tomatoes tortilla tortillas turkey up use vegetables verde vidalia vinaigrette vinegar wash water week whipped white whole with yellow yogurt your zest black long roughly layer layers until according instructions crispy fry fried head heads ears pecans pecan homemade caramelized caramelize linguine burrata optional substack lengthwise according packet package ears arugula almonds walnuts pistachios grate grated sage leek leeks mushrooms cauliflower brussels sprouts asparagus fennel radish radishes mango pineapple peach peaches apple apples grapes raisins dates feta mozzarella ricotta parmigiano reggiano gruyere gouda halloumi tahini chickpeas lentils farro orzo couscous barley noodles ramen udon tofu bacon prosciutto ham pork chops tenderloin flank skirt ribeye strip thighs drumsticks wings ground cod tilapia halibut mahi tuna scallops crab lobster pita naan tortillas focaccia ciabatta sourdough brioche buns baguette crostini croutons gravy cranberry cranberries stuffing turkey pumpkin squash delicata butternut acorn yam`.split(" ");
+function addWords(vocab, text, weight){
+  for (const w of String(text || "").match(/[A-Za-zÀ-ÿ’'-]+/g) || []) {
+    for (const part of w.split(/-/)) {
+      const lw = part.toLowerCase().replace(/[’']s$/, ""), k = skel(lw);
+      if (k.length < 1 || lw.length < 2) continue;
+      const cands = vocab.get(k) || new Map();
+      cands.set(lw, (cands.get(lw) || 0) + weight); vocab.set(k, cands);
+    }
+  }
+  return vocab;
+}
+function baseVocab(){ const v = new Map(); addWords(v, BASE_WORDS.join(" "), 2); return v; }
+function looksGarbled(text){
+  const letters = (String(text).match(/[A-Za-z]/g) || []).length;
+  if (letters < 60) return false;
+  const ag = (String(text).match(/[aAgG]/g) || []).length;
+  return ag / letters < 0.015; // normal English is about 9% a/g
+}
+function capLike(src, w){
+  if (src.length > 1 && src === src.toUpperCase() && /[A-Z]/.test(src)) return w.toUpperCase();
+  if (/^[A-ZÀ-Þ]/.test(src)) return w[0].toUpperCase() + w.slice(1);
+  return w;
+}
+function repairRun(run, vocab){
+  // run: letters separated by single spaces, e.g. "J l peño Chedd r"
+  const ch = run.split(" ").filter(Boolean), n = ch.length;
+  const best = Array(n + 1).fill(null); best[0] = {score: 0, out: []};
+  for (let i = 0; i < n; i++) {
+    if (!best[i]) continue;
+    for (let j = i + 1; j <= Math.min(n, i + 6); j++) {
+      const joined = ch.slice(i, j).join(""), k = skel(joined), cands = vocab.get(k);
+      let score, word, hit = null;
+      if (cands) {
+        const exact = j === i + 1 && cands.get(joined.toLowerCase());
+        if (exact) hit = {w: joined.toLowerCase(), n: exact + 4};
+        else for (const [w, n] of cands) if (!hit || n > hit.n) hit = {w, n};
+      }
+      if (hit) { score = best[i].score + 1 + Math.log(1 + hit.n) + (j - i - 1) * 2.5 - (k.length <= 1 ? 3 : 0); word = capLike(ch[i], hit.w); }
+      else if (j === i + 1) { score = best[i].score - 3; word = ch[i]; }
+      else continue;
+      if (!best[j] || score > best[j].score) best[j] = {score, out: [...best[i].out, word]};
+    }
+  }
+  return best[n].out.join(" ");
+}
+function repairText(text, vocab){
+  return String(text).split("\n").map(line =>
+    line.replace(/[A-Za-zÀ-ÿ](?:[A-Za-zÀ-ÿ ]*[A-Za-zÀ-ÿ])?/g, run => {
+      // keep hyphens/apostrophes inside words; repair each space-separated stretch
+      return repairRun(run, vocab);
+    })
+  ).join("\n");
+}
+
+const LIST_FOLDER = /^(printable menu|prep list|(free )?grocery list|consolidated lists?|consolidated recipes|all consolidated|all documents|recipe pdfs?)/i;
+const STAPLE_RX = /\b(oil|vinegar|salt|pepper\b(?! jack)|black pepper|flour|sugar|honey|soy sauce|bouillon|yeast|powder|paprika|cumin|oregano|chili flakes|red chili|cinnamon|cornstarch|corn starch|baking (soda|powder)|worcestershire|dijon|mustard powder|maple syrup|mayonnaise|vanilla|sesame oil|fish sauce|garlic powder|onion powder|spices?)\b/i;
+function cleanItemName(s){
+  return s.replace(/\\/g, "").replace(/^\+\s*/, "").replace(/\[[^\]]*\]/g, "").replace(/\((optional|or [^)]*)\)/gi, "").replace(/^\+\s*/, "").replace(/^(Fats|Other|Essentials)(?=[A-Z])/, "").replace(/\s+/g, " ").trim();
+}
+function parseGroceryItem(raw){
+  let s = cleanItemName(String(raw).trim());
+  if (!s || s.length < 2) return null;
+  let qtyTxt = "";
+  // "(1 lb) Ground Turkey", "1 (8-9 oz) Chicken Breast", "Shallot (1 medium/large)", "Pinto Beans (2 x 15 oz cans)"
+  let m = s.match(/^(\d+\s*)?\(([^)]*)\)\s*(.+)$/);
+  if (m) { qtyTxt = (m[1] || "").trim() || m[2]; s = m[3]; }
+  else if ((m = s.match(/^(.*?)\s*\(([^)]*)\)\s*$/))) { s = m[1]; qtyTxt = m[2]; }
+  const name = s.replace(/\s*\([^)]*\)/g, "").replace(/\s+/g, " ").trim();
+  if (!name || /^(key|produce|dairy|shelf|alcohol|suggested|essentials|time savers|other|elements|leftovers|cheeses|frozen)/i.test(name) && name.split(" ").length < 3 && !/cheese/i.test(name)) return null;
+  let qty = 1, unit = "";
+  const q = String(qtyTxt).replace(/(\d+)\s*x\s*(\d)/i, "$1 × $2");
+  const mult = q.match(/^(\d+)\s*×\s*([\d.\/]+)\s*([a-z]+)?\s*(cans?|bags?|boxes?|jars?|bottles?|containers?)?/i);
+  if (mult) { qty = +mult[1]; unit = UNIT_ALIASES[(mult[4] || "").toLowerCase()] || ""; }
+  else { const p = parseLine(q.replace(/(\d)\s*-\s*\d+/, "$1") + " x"); if (/^[\d½¼¾⅓⅔]/.test(q.trim())) { qty = p.qty; unit = p.unit; } }
+  if (unit === "lb" && /lbs? or/.test(q)) unit = "lb";
+  return {name, qty: qty || 1, unit, note: qtyTxt && !/^\d+$/.test(qtyTxt) ? qtyTxt : ""};
+}
+function parseKey(text){
+  const key = {};
+  for (const m of String(text).matchAll(/([¹²³⁴⁵⁶⁷⁸⁹])\s*=\s*([^¹²³⁴⁵⁶⁷⁸⁹\n]+)/g)) {
+    const n = SUP.indexOf(m[1]); const label = m[2].trim(); if (label && !key[n]) key[n] = label;
+  }
+  return key;
+}
+function parseLists(text){
+  const lines = String(text).replace(/\r/g, "").split("\n").map(l => l.replace(/\\/g, "").trim());
+  const key = parseKey(text);
+  const prep = [], grocery = [];
+  let cur = null, essential = false, inMenu = false, menuLines = [];
+  const isKeyLine = l => /^[¹²³⁴⁵⁶⁷⁸⁹]\s*=/.test(l) || /^KEY$/i.test(l) || /^\*\s*=/.test(l);
+  const isHeading = l => /^(PREP LIST|GROCERY LIST|THIS WEEK.?S MENU|KEY|GREEN = |ESSENTIALS|<https?:)/i.test(l);
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (!l) continue;
+    if (/^ESSENTIALS/i.test(l) || /^Essentials$/i.test(l)) { essential = true; continue; }
+    if (/^GROCERY LIST/i.test(l)) { essential = false; cur = null; continue; }
+    if (/^PREP LIST/i.test(l)) { cur = null; continue; }
+    if (/^(Additional Meals|Leftovers)/i.test(l)) { essential = "extra"; continue; }
+    if (/^□/.test(l)) {
+      cur = {text: l.replace(/^□\s*/, ""), detail: []};
+      // join wrapped line: no superscript at the end and the next line continues it
+      const open = t => (t.match(/\(/g) || []).length > (t.match(/\)/g) || []).length || (t.match(/‘/g) || []).length > (t.match(/’/g) || []).length;
+      while (!/[¹²³⁴⁵⁶⁷⁸⁹]\s*$/.test(cur.text) && (open(cur.text) || /[-,]\s*$|\b(and|the|in|of|to|with|a|nd)$/i.test(cur.text))) {
+        const nxt = lines.slice(i + 1).find(Boolean); if (!nxt || /^□/.test(nxt) || isHeading(nxt)) break;
+        i = lines.indexOf(nxt, i + 1); cur.text += " " + nxt;
+      }
+      prep.push(cur); continue;
+    }
+    if (isKeyLine(l) || isHeading(l)) { cur = null; continue; }
+    if (cur && !/^(Produce|Dairy|Shelf|Suggested|Proteins|Cheeses|Frozen|Nuts|Alcohol|Bakery|Meat|Pantry)\b/.test(l)) {
+      // everything under a □ task until the next heading belongs to that task
+      if (cur.detail.length && !/[¹²³⁴⁵⁶⁷⁸⁹)]\s*$/.test(cur.detail[cur.detail.length - 1]) && !/^How To/i.test(l) && /^[a-z(]/.test(l)) cur.detail[cur.detail.length - 1] += " " + l;
+      else cur.detail.push(l);
+      continue;
+    }
+    if (cur && !/[¹²³⁴⁵⁶⁷⁸⁹]/.test(l) && /^(How To|[a-z])/.test(l) || cur && /^How To/i.test(cur.detail[cur.detail.length - 1] || "") && !/[¹²³⁴⁵⁶⁷⁸⁹]/.test(l)) {
+      if (cur.detail.length && /^How To/i.test(cur.detail[cur.detail.length - 1]) || /^How To/i.test(l) || !cur.detail.length) cur.detail.push(l); else cur.detail[cur.detail.length - 1] += " " + l;
+      continue;
+    }
+    if (cur && /[¹²³⁴⁵⁶⁷⁸⁹]\s*$/.test(l) && !/[¹²³⁴⁵⁶⁷⁸⁹]\s*\S/.test(l.replace(/[¹²³⁴⁵⁶⁷⁸⁹]+\s*$/, ""))) {
+      // a sub-line of the current prep task, like "Garlic (peel 4 cloves)²³⁴"
+      if (/\(|\b(slice|chop|dice|peel|wash|cut|toast|bake|see)\b/i.test(l) || cur.detail.length) { cur.detail.push(l); continue; }
+    }
+    if (cur && !/[¹²³⁴⁵⁶⁷⁸⁹]/.test(l) && cur.detail.length && !/\)$/.test(cur.detail[cur.detail.length - 1])) { cur.detail[cur.detail.length - 1] += " " + l; continue; }
+    // grocery items end with recipe numbers: "Garlic (3 cloves)¹²³ Russet Potatoes (2 lbs)²³"
+    if (/[¹²³⁴⁵⁶⁷⁸⁹]/.test(l)) {
+      cur = null;
+      for (const m of l.matchAll(/([^¹²³⁴⁵⁶⁷⁸⁹]+?)\s*([¹²³⁴⁵⁶⁷⁸⁹]+)/g)) {
+        const it = parseGroceryItem(m[1]); if (!it) continue;
+        it.tags = supToNums(m[2]);
+        it.essential = essential === true || STAPLE_RX.test(it.name);
+        it.extra = essential === "extra";
+        grocery.push(it);
+      }
+      continue;
+    }
+    if (!cur) menuLines.push(l);
+  }
+  prep.forEach(t => {
+    t.tags = [...new Set([...supToNums((t.text.match(/[¹²³⁴⁵⁶⁷⁸⁹]+/g) || []).join("")), ...t.detail.flatMap(d => supToNums((d.match(/[¹²³⁴⁵⁶⁷⁸⁹]+/g) || []).join("")))])];
+    t.text = t.text.replace(/[¹²³⁴⁵⁶⁷⁸⁹]+/g, "").replace(/\s+-\s*$/, "").replace(/\s+/g, " ").trim();
+    t.detail = t.detail.map(d => d.replace(/[¹²³⁴⁵⁶⁷⁸⁹]+/g, "").replace(/\s+/g, " ").trim()).filter(Boolean);
+  });
+  // de-duplicate grocery items (lists often repeat between consolidated and single files)
+  const seen = new Map();
+  for (const g of grocery) { const k = norm(g.name); if (!seen.has(k)) seen.set(k, g); }
+  return {key, prep: prep.filter(t => t.text), grocery: [...seen.values()], menuLines};
+}
+// Pair menu titles (and their one-line descriptions) with recipe names.
+function similarity(a, b){
+  const A = skel(a).replace(/[^a-zà-ÿ]/g, ""), B = skel(b).replace(/[^a-zà-ÿ]/g, "");
+  if (!A || !B) return 0;
+  if (A === B) return 1;
+  if (A.startsWith(B) || B.startsWith(A)) return 0.7 + 0.3 * Math.min(A.length, B.length) / Math.max(A.length, B.length);
+  const ta = new Set(skel(a).split(/[^a-zà-ÿ]+/).filter(w => w.length > 2)), tb = new Set(skel(b).split(/[^a-zà-ÿ]+/).filter(w => w.length > 2));
+  const inter = [...ta].filter(x => tb.has(x)).length;
+  return inter / Math.max(1, Math.min(ta.size, tb.size)) * 0.85;
+}
+function matchMenu(menuLines, recipes){
+  const out = [];
+  for (let i = 0; i < menuLines.length; i++) {
+    const l = menuLines[i];
+    if (/printables|google docs|^this week/i.test(l) || (l.match(/,/g) || []).length >= 2) continue;
+    let best = null;
+    recipes.forEach((r, idx) => { const s = similarity(l, r.name); if (s > 0.6 && (!best || s > best.s)) best = {s, idx}; });
+    if (best && !out.some(o => o.idx === best.idx)) {
+      let desc = menuLines[i + 1] && /,/.test(menuLines[i + 1]) ? menuLines[i + 1] : "";
+      if (desc && menuLines[i + 2] && /^[a-z(]/.test(menuLines[i + 2]) && !recipes.some(r => similarity(menuLines[i + 2], r.name) > 0.6)) desc += " " + menuLines[i + 2];
+      out.push({idx: best.idx, desc});
+    }
+  }
+  return out;
+}
+function seasonOf(text){ const m = String(text).match(/\b(Spring|Summer|Fall|Autumn|Winter)\s+(20\d\d)\b/); return m ? `${m[1]} ${m[2]}` : ""; }
+
+/* ---------- menu library: storage ---------- */
+// The library lives in your Firebase (collection "library"), readable by everyone who signs in.
+const LIB = { index: null, menus: {}, err: "" };
+const libReady = () => !!(sync.fb && sync.db && sync.user);
+const libDoc = id => sync.fb.doc(sync.db, "library", id);
+async function libIndex(force){
+  if (!libReady()) return null;
+  if (LIB.index && !force) return LIB.index;
+  const snap = await sync.fb.getDoc(libDoc("index"));
+  LIB.index = snap.exists() ? snap.data() : {menus: []};
+  LIB.index.menus ||= [];
+  return LIB.index;
+}
+async function libMenu(id){
+  if (LIB.menus[id]) return LIB.menus[id];
+  const snap = await sync.fb.getDoc(libDoc("m-" + id));
+  return snap.exists() ? (LIB.menus[id] = snap.data()) : null;
+}
+const SEASON_ORDER = {winter: 0, spring: 1, summer: 2, fall: 3, autumn: 3};
+const seasonRank = s => { const m = String(s || "").match(/(\w+)\s+(\d{4})/); return m ? +m[2] * 10 + (SEASON_ORDER[m[1].toLowerCase()] ?? 0) : 0; };
+
+/* ---------- menu library: importer (reads your Drive) ---------- */
+const FOLDER = "application/vnd.google-apps.folder";
+const isDocFile = f => f.mimeType === "application/pdf" || f.mimeType === "application/vnd.google-apps.document";
+async function driveList(q){
+  const out = []; let tok = "";
+  do {
+    const r = await gfetch(`${DAPI}?q=${encodeURIComponent(q)}&pageSize=1000&fields=${encodeURIComponent("nextPageToken,files(id,name,mimeType,modifiedTime)")}${tok ? `&pageToken=${encodeURIComponent(tok)}` : ""}`);
+    const j = await r.json(); out.push(...(j.files || [])); tok = j.nextPageToken || "";
+  } while (tok);
+  return out;
+}
+const driveChildren = id => driveList(`'${id}' in parents and trashed = false`);
+const driveFolderByName = name => driveList(`name = '${String(name).replace(/\\/g, "").replace(/'/g, "\\'")}' and mimeType = '${FOLDER}' and trashed = false`);
+async function pool(items, n, fn){
+  const out = new Array(items.length); let i = 0;
+  await Promise.all(Array.from({length: Math.min(n, items.length)}, async () => { while (i < items.length) { const k = i++; out[k] = await fn(items[k], k); } }));
+  return out;
+}
+function parseCsv(text){
+  const rows = []; let row = [], cell = "", q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) { if (c === '"' && text[i + 1] === '"') { cell += '"'; i++; } else if (c === '"') q = false; else cell += c; }
+    else if (c === '"') q = true; else if (c === ",") { row.push(cell); cell = ""; }
+    else if (c === "\n" || c === "\r") { if (c === "\r" && text[i + 1] === "\n") i++; row.push(cell); rows.push(row); row = []; cell = ""; }
+    else cell += c;
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  return rows.filter(r => r.some(Boolean));
+}
+const menuKey = s => String(s || "").toLowerCase().replace(/[‘’'"“”]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+const cleanFolderName = s => String(s || "").replace(/_/g, " ").replace(/\.pdf$/i, "").replace(/\s+/g, " ").trim().replace(/(\S)\s(With|And|Of|The|En|In|On|For)\b(?=\s)/g, (m, a, w) => `${a} ${w.toLowerCase()}`);
+function pickRecipe(text, wantName){
+  let rs = splitRecipes(text);
+  if (!rs.length) { const one = parseRecipeText(text); if (one.ingredients.length) rs = [one]; }
+  if (!rs.length) return null;
+  let best = rs[0], bs = -1;
+  for (const r of rs) { const s = similarity(r.name, wantName); if (s > bs) { bs = s; best = r; } }
+  // folder names can be cut off at ~70 characters; prefer the full title from the PDF when it matches
+  const clean = cleanFolderName(wantName);
+  best.name = bs > 0.6 && best.name.length > clean.length ? best.name : clean;
+  return best;
+}
+const IMP = { running: false, stop: false };
+async function importLibrary(opts){
+  const s = ui.sheet; IMP.running = true; IMP.stop = false; IMP.sheet = s;
+  const say = (msg, extra) => { s.progress = msg; if (extra) s.log = [...(s.log || []), extra].slice(-200); if (ui.sheet === s) renderSheet(); };
+  try {
+    say("Finding your folders…");
+    const roots = await driveFolderByName(opts.root);
+    if (!roots.length) throw {msg: `Couldn't find a Drive folder named "${opts.root}". Check the name and try again.`};
+    const menus = (await driveChildren(roots[0].id)).filter(f => f.mimeType === FOLDER).sort((a, b) => a.name.localeCompare(b.name));
+    // _reupload: loose recipe PDFs plus _index.csv saying which menu each belongs to
+    const extra = {};
+    if (opts.reupload) {
+      const re = await driveFolderByName(opts.reupload);
+      if (re.length) {
+        const files = await driveChildren(re[0].id);
+        const csv = files.find(f => /\.csv$/i.test(f.name) || f.mimeType === "text/csv");
+        const byName = Object.fromEntries(files.filter(isDocFile).map(f => [f.name, f]));
+        if (csv) {
+          const rows = parseCsv(await (await gfetch(`${DAPI}/${csv.id}?alt=media`)).text());
+          for (const [file, post] of rows.slice(1)) { const f = byName[file]; if (f && post) (extra[menuKey(post)] ||= []).push(f); }
+        }
+        const claimed = new Set(Object.values(extra).flat().map(f => f.id));
+        extra["__loose"] = files.filter(f => isDocFile(f) && !claimed.has(f.id));
+      }
+    }
+    const index = (await libIndex(true)) || {menus: []};
+    const known = Object.fromEntries((index.menus || []).map(m => [m.id, m]));
+    const vocab = baseVocab();
+    let done = 0, made = 0, skipped = 0;
+    for (const folder of menus) {
+      if (IMP.stop) break;
+      done++;
+      if (known[folder.id] && !opts.redo) { skipped++; continue; }
+      say(`Menu ${done} of ${menus.length}: ${folder.name}`);
+      try {
+        const m = await importMenu(folder, extra[menuKey(folder.name)] || [], vocab, t => say(`Menu ${done} of ${menus.length}: ${folder.name} · ${t}`));
+        if (!m.recipes.length) { say(s.progress, `${folder.name}: no recipes found, skipped`); continue; }
+        await sync.fb.setDoc(libDoc("m-" + folder.id), m);
+        LIB.menus[folder.id] = m;
+        known[folder.id] = {id: folder.id, name: m.name, season: m.season, mains: m.recipes.filter(r => r.main).map(r => r.name),
+          recipes: m.recipes.map((r, i) => ({i, name: r.name, cat: r.cat})), prep: m.prep.length, grocery: m.grocery.length};
+        made++;
+        if (made % 5 === 0) await sync.fb.setDoc(libDoc("index"), {menus: Object.values(known), updated: Date.now()});
+      } catch (e) {
+        if (e && e.msg && /expired|turned off/i.test(e.msg)) throw e;
+        say(s.progress, `${folder.name}: ${e.msg || "couldn't read this menu"}`);
+      }
+    }
+    // loose re-uploaded recipes that don't belong to a menu
+    const loose = extra["__loose"] || [];
+    if (loose.length && !IMP.stop && (!known["__loose"] || opts.redo)) {
+      say("Adding loose recipes from " + opts.reupload);
+      const recipes = (await pool(loose, 3, async f => { try { return pickRecipe(await fileText(f), f.name); } catch { return null; } })).filter(Boolean)
+        .map(r => ({...r, cat: guessCat(r.name), main: guessCat(r.name) === "Main", desc: ""}));
+      if (recipes.length) {
+        const m = {id: "__loose", name: "More recipes", season: "", recipes, prep: [], grocery: [], key: {}, loose: true, importedAt: Date.now()};
+        await sync.fb.setDoc(libDoc("m-__loose"), m); LIB.menus["__loose"] = m;
+        known["__loose"] = {id: "__loose", name: m.name, season: "", mains: [], recipes: recipes.map((r, i) => ({i, name: r.name, cat: r.cat})), prep: 0, grocery: 0, loose: true};
+      }
+    }
+    await sync.fb.setDoc(libDoc("index"), {menus: Object.values(known), updated: Date.now()});
+    LIB.index = {menus: Object.values(known)};
+    s.done = true;
+    say(IMP.stop ? `Stopped. ${made} menus added so far; run it again to continue.` : `Done. ${made} menus added${skipped ? `, ${skipped} already in the library` : ""}. The library has ${Object.values(known).filter(m => !m.loose).length} menus.`);
+  } catch (e) {
+    console.warn("Library import failed", e);
+    s.err = true; say(e.msg || (e.code === "permission-denied" ? "Your database rules don't allow the library yet. Update firestore.rules (setup guide, step 7) and try again." : "The import stopped. Run it again to continue where it left off."));
+  }
+  IMP.running = false; keepAwake(false);
+  if (ui.sheet === s) renderSheet();
+}
+async function importMenu(folder, extraFiles, vocab, step){
+  const kids = await driveChildren(folder.id);
+  const sub = kids.filter(k => k.mimeType === FOLDER);
+  const listFolders = sub.filter(k => LIST_FOLDER.test(k.name.trim()));
+  const recipeFolders = sub.filter(k => !LIST_FOLDER.test(k.name.trim()));
+  const textOf = async f => { try { return await fileText(f); } catch (e) { if (e && e.msg && /expired|turned off/i.test(e.msg)) throw e; return ""; } };
+  step("recipes");
+  let recipes = (await pool(recipeFolders, 3, async rf => {
+    const files = (await driveChildren(rf.id)).filter(isDocFile);
+    for (const f of files) { const t = await textOf(f); if (!t) continue; addWords(vocab, t, 3); const r = pickRecipe(t, rf.name); if (r) return r; }
+    return null;
+  })).filter(Boolean);
+  for (const f of extraFiles) {
+    const t = await textOf(f); if (!t) continue; addWords(vocab, t, 3);
+    const r = pickRecipe(t, f.name);
+    if (r && !recipes.some(x => similarity(x.name, r.name) > 0.8)) recipes.push(r);
+  }
+  // list documents: menu, prep list, grocery list, consolidated lists (and recipes, as a fallback)
+  step("lists");
+  const listTexts = {}, consolidatedRecipes = [];
+  await pool(listFolders, 3, async lf => {
+    const files = (await driveChildren(lf.id)).filter(isDocFile);
+    for (const f of files) {
+      const t = await textOf(f); if (!t) continue;
+      if (/consolidated recipes|all consolidated|all documents/i.test(lf.name)) consolidatedRecipes.push(t);
+      else (listTexts[lf.name.toLowerCase()] ||= []).push(t);
+    }
+  });
+  for (const f of kids.filter(isDocFile)) { const t = await textOf(f); if (t) (/recipe/i.test(f.name) ? consolidatedRecipes : (listTexts["loose"] ||= [])).push(t); }
+  if (!recipes.length) {
+    for (const t of consolidatedRecipes) for (const r of splitRecipes(t)) if (!recipes.some(x => similarity(x.name, r.name) > 0.8)) recipes.push(r);
+  }
+  for (const t of consolidatedRecipes) addWords(vocab, t, 2);
+  recipes.forEach(r => addWords(vocab, r.name, 6));
+  // Prefer the separate menu / prep / grocery files; use the consolidated list when they're missing.
+  const pick = rx => Object.entries(listTexts).filter(([k]) => rx.test(k)).flatMap(([, v]) => v);
+  let texts = [...pick(/printable menu/), ...pick(/prep list/), ...pick(/grocery/)];
+  if (!pick(/prep list/).length || !pick(/grocery/).length) texts = [...texts, ...pick(/consolidated lists?|loose/)];
+  if (!texts.length && consolidatedRecipes.length) texts = consolidatedRecipes.filter(t => /PREP LIST|GROCERY LIST/.test(t));
+  const fixed = texts.map(t => looksGarbled(t) ? repairText(t, vocab) : t).join("\n\n");
+  const L = parseLists(fixed);
+  // which recipes are the week's meals
+  const menuItems = matchMenu(L.menuLines, recipes);
+  const mains = new Map(menuItems.map(m => [m.idx, m.desc]));
+  if (!mains.size) Object.values(L.key).forEach(label => { let b = -1, bs = 0.55; recipes.forEach((r, i) => { const sc = similarity(label, r.name); if (sc > bs) { bs = sc; b = i; } }); if (b >= 0) mains.set(b, ""); });
+  if (!mains.size) recipes.forEach((r, i) => { if (guessCat(r.name) === "Main") mains.set(i, ""); });
+  const order = [...mains.keys()];
+  const out = recipes.map((r, i) => ({name: r.name, servings: r.servings || null, time: r.time || "", ingredients: r.ingredients, steps: r.steps || "",
+    main: mains.has(i), desc: mains.get(i) || "", cat: mains.has(i) ? (guessCat(r.name) === "Main" ? "Main" : guessCat(r.name)) : (guessCat(r.name) === "Main" ? "Sauce & prep" : guessCat(r.name))}));
+  // meals in menu order first, then components
+  out.sort((a, b) => (b.main - a.main) || (a.main ? order.indexOf(recipes.findIndex(r => r.name === a.name)) - order.indexOf(recipes.findIndex(r => r.name === b.name)) : a.name.localeCompare(b.name)));
+  const keyLabel = n => L.key[n] || "";
+  const prep = L.prep.map(t => ({text: t.text, detail: t.detail, for: t.tags.map(keyLabel).filter(Boolean).join(", ")}));
+  const grocery = L.grocery.filter(g => g.name.length < 80).map(g => ({name: g.name, qty: Math.round(g.qty * 100) / 100, unit: g.unit, note: g.note || "", essential: !!g.essential, extra: !!g.extra, for: g.tags.map(keyLabel).filter(Boolean).join(", ")}));
+  const doc = {id: folder.id, name: cleanFolderName(folder.name), season: seasonOf(texts.join(" ") + " " + consolidatedRecipes.join(" ").slice(0, 400)),
+    recipes: out, prep, grocery, key: L.key, src: {modified: folder.modifiedTime || ""}, importedAt: Date.now()};
+  // stay well under Firestore's 1 MB document limit
+  if (JSON.stringify(doc).length > 900000) doc.recipes.forEach(r => { r.steps = r.steps.slice(0, 4000); });
+  return doc;
+}
+
+/* ---------- menu library: using it ---------- */
+function libMatches(m, q){
+  if (!q) return true;
+  return m.name.toLowerCase().includes(q) || (m.season || "").toLowerCase().includes(q) || (m.recipes || []).some(r => r.name.toLowerCase().includes(q));
+}
+function libListHtml(s){
+  const idx = LIB.index;
+  if (!idx) return `<div class="status">Loading menus…</div>`;
+  const q = (s.q || "").trim().toLowerCase();
+  if (s.mode === "recipes") {
+    const rows = [];
+    for (const m of idx.menus) for (const r of m.recipes || []) if (!q || r.name.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)) rows.push({m, r});
+    rows.sort((a, b) => a.r.name.localeCompare(b.r.name));
+    if (!rows.length) return `<div class="empty">${idx.menus.length ? "No recipes match." : "The menu library is empty. Build it from Drive in Settings."}</div>`;
+    return rows.slice(0, 150).map(({m, r}) => { const mine = state.recipes.some(x => x.name.toLowerCase() === r.name.toLowerCase());
+      return `<button class="rcard" data-act="lib-recipe" data-m="${esc(m.id)}" data-i="${r.i}"><div class="cat">${esc(r.cat || "")}</div><h3>${esc(r.name)}</h3><div class="sub">${esc(m.loose ? "Extra recipe" : m.name)}${mine ? " · in your recipes" : ""}</div></button>`; }).join("") +
+      (rows.length > 150 ? `<p class="hint">Showing 150 of ${rows.length}. Search to narrow it down.</p>` : "");
+  }
+  const menus = idx.menus.filter(m => !m.loose && libMatches(m, q)).sort((a, b) => seasonRank(b.season) - seasonRank(a.season) || a.name.localeCompare(b.name));
+  if (!menus.length) return `<div class="empty">${idx.menus.length ? "No menus match." : "The menu library is empty. Build it from Drive in Settings → Menu library."}</div>`;
+  return menus.map(m => `<button class="rcard" data-act="lib-open" data-m="${esc(m.id)}">${m.season ? `<div class="season">${esc(m.season)}</div>` : ""}<h3>${esc(m.name)}</h3>
+    <div class="sub">${(m.mains || []).slice(0, 6).map(esc).join(" · ") || `${(m.recipes || []).length} recipes`}</div>
+    <div class="sub" style="margin-top:4px">${(m.mains || []).length} meals${m.prep ? ` · ${m.prep} prep steps` : ""}${m.grocery ? ` · grocery list` : ""}</div></button>`).join("");
+}
+function copyLibRecipe(m, i){
+  const r = m.recipes[i], key = `${m.id}:${i}`;
+  let mine = state.recipes.find(x => x.lib === key) || state.recipes.find(x => x.name.toLowerCase() === r.name.toLowerCase());
+  if (!mine) { mine = {id: uid(), name: r.name, time: r.time || "", servings: r.servings || null, ingredients: clone(r.ingredients || []), steps: r.steps || "", cat: r.cat || guessCat(r.name), prep: "", lib: key, fromMenu: m.name}; state.recipes.push(mine); }
+  return mine;
+}
+function needForRecipes(counts){
+  const need = {};
+  for (const [rid, n] of Object.entries(counts)) {
+    const times = n - portionsFor(rid); if (times <= 0) continue;
+    for (const ing of recipeById(rid).ingredients) { if (STAPLES.has(ing.name.toLowerCase()) || STAPLES.has(norm(ing.name))) continue;
+      const key = norm(ing.name) + "|" + ing.unit; (need[key] ||= {name: ing.name, unit: ing.unit, qty: 0}).qty += ing.qty * times; } }
+  const short = [];
+  for (const n of Object.values(need)) { const p = findPantry(n.name);
+    if (!p || p.qty <= 0) short.push(n);
+    else { const have = convert(p.qty, p.unit, n.unit, n.name); if (have != null && have < n.qty) short.push({...n, qty: Math.round((n.qty - have) * 100) / 100}); } }
+  return short;
+}
+function useMenu(m, o){
+  const ws = o.weekStart, wk = ymd(ws);
+  const ids = m.recipes.map((r, i) => copyLibRecipe(m, i).id);
+  const mains = m.recipes.map((r, i) => r.main ? ids[i] : null).filter(Boolean);
+  let planned = 0, groc = 0, inStock = 0, prep = 0;
+  if (o.plan) mains.forEach((rid, k) => { const day = ymd(addDays(ws, (o.startDay + k) % 7)); addToPlan(day, o.meal || "dinner", rid); planned++; });
+  if (o.grocery) {
+    if (m.grocery.length) {
+      const items = m.grocery.filter(g => !g.extra && (o.staples || !g.essential));
+      const toAdd = items.filter(g => { const p = findPantry(g.name); if (p && p.qty > 0 && !o.ignorePantry) { inStock++; return false; } return true; });
+      groc = addToGrocery(toAdd.map(g => ({name: g.name, qty: g.qty, unit: g.unit})));
+    } else {
+      const counts = {}; ids.forEach(id => { counts[id] = (counts[id] || 0) + 1; });
+      groc = addToGrocery(needForRecipes(counts));
+    }
+  }
+  if (o.prep && m.prep.length) {
+    const have = new Set((state.prep[wk] || []).map(t => t.text.toLowerCase()));
+    const tasks = m.prep.filter(t => !have.has(t.text.toLowerCase())).map(t => ({id: uid(), text: t.text, detail: t.detail || [], for: t.for || m.name, night: NIGHT_BEFORE.test(t.text + " " + (t.detail || []).join(" ")), done: false}));
+    (state.prep[wk] ||= []).push(...tasks); prep = tasks.length;
+  }
+  (state.weekMenus ||= {})[wk] = [...new Set([...(state.weekMenus[wk] || []), m.name])];
+  return {planned, groc, inStock, prep, recipes: ids.length};
 }
 
 /* ---------- backup ---------- */
@@ -1066,7 +1522,7 @@ function renderPrepCard(){
   if (ready.length) h += `<div class="readyrow">${ready.map(p => `<span class="chip ${!isFreezer(p.loc) && ageDays(p.made) >= 4 ? "warn" : "ok"}">${esc(p.name)} · ${p.portions}</span>`).join("")}</div>`;
   if (tasks.length) h += `<ul class="tasks">` + tasks.map(t => `<li class="${t.done ? "done" : ""}">
       <button class="check ${t.done ? "on" : ""}" data-act="task-toggle" data-id="${t.id}" aria-label="${t.done ? "Mark not done" : "Mark done"}: ${esc(t.text)}">${I.tick}</button>
-      <div class="grow"><div class="name">${esc(t.text)}</div>${t.for ? `<div class="sub">${esc(t.for)}</div>` : ""}
+      <div class="grow"><div class="name">${esc(t.text)}</div>${t.for ? `<div class="sub">${esc(t.for)}</div>` : ""}${t.detail && t.detail.length && !t.done ? `<details class="more"><summary>${t.detail.length} step${t.detail.length === 1 ? "" : "s"}</summary><ul class="detail">${t.detail.map(d => `<li>${esc(d)}</li>`).join("")}</ul></details>` : ""}
         ${(t.night || t.batch) && !t.done ? `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">${t.night ? `<span class="chip warn">Night before</span>` : ""}${t.batch ? `<button class="btn small" data-act="task-batch" data-id="${t.id}">Cook &amp; portion</button>` : ""}</div>` : ""}</div>
       <button class="x" data-act="task-del" data-id="${t.id}" aria-label="Remove ${esc(t.text)}">×</button></li>`).join("") + `</ul>`;
   else h += `<p class="hint" style="margin:6px 0 4px">Plan meals below, then tap <b>Suggest prep</b> for a checklist of what to do ahead: marinades, sauces, chopping, grains and batch cooking.</p>`;
@@ -1155,7 +1611,9 @@ function renderPlan(){
   const ws = ui.weekStart, we = addDays(ws, 6), todayK = ymd(new Date());
   const fmt = d => d.toLocaleDateString(undefined, {month:"short", day:"numeric"});
   let h = `<div class="week"><button class="btn small ghost" data-act="wk" data-d="-7" aria-label="Previous week">‹</button><strong>${fmt(ws)} – ${fmt(we)}</strong><button class="btn small ghost" data-act="wk" data-d="7" aria-label="Next week">›</button></div>
+  ${(state.weekMenus || {})[ymd(ws)] ? `<div class="sub" style="margin:-4px 0 10px;text-align:center">This week's menu: <b>${state.weekMenus[ymd(ws)].map(esc).join(" + ")}</b></div>` : ""}
   ${renderPrepCard()}
+  <div class="actions" style="margin-bottom:8px"><button class="btn" data-act="lib-browse">Browse menus</button></div>
   <div class="actions two" style="margin-bottom:12px"><button class="btn ghost" data-act="shop-week">Shop for this week</button><button class="btn ghost" data-act="week-tools">Copy &amp; rotations</button></div>`;
   for (let i = 0; i < 7; i++) {
     const d = addDays(ws, i), k = ymd(d), day = state.plan[k] || {};
@@ -1198,7 +1656,7 @@ function cookListHtml(){
 }
 function renderCook(){
   const f = ui.cookFilter;
-  return `<div class="addrow">${driveReady() ? `<button class="btn small ghost" data-act="drive-open">From Drive</button>` : ""}<button class="btn small ghost" data-act="paste-open">Add from link</button><button class="btn small ghost" data-act="new-r">+ New</button></div>
+  return `<div class="addrow"><button class="btn small ghost" data-act="lib-recipes">From library</button>${driveReady() ? `<button class="btn small ghost" data-act="drive-open">From Drive</button>` : ""}<button class="btn small ghost" data-act="paste-open">Add from link</button><button class="btn small ghost" data-act="new-r">+ New</button></div>
   <input id="cookQ" class="search" type="search" placeholder="Search recipes or ingredients" autocomplete="off" value="${esc(ui.cookQ || "")}" aria-label="Search recipes">
   <div class="filters" role="group" aria-label="Filter recipes">
     ${[["all","All recipes"],["ready","Ready now"],["almost","Missing 1–2"],["useup","Use it up"],["fav","Favorites"],["prepped","Prepped"]].map(([k,l]) => `<button data-act="filter" data-f="${k}" aria-pressed="${f===k}">${l}</button>`).join("")}
@@ -1270,6 +1728,71 @@ function renderSheet(){
       <div id="pickList">${pickListHtml(s)}</div>
       <button class="btn ${s.added && s.added.length ? "" : "plain"}" data-act="close" style="width:100%;margin-top:4px">${s.added && s.added.length ? "Done" : "Cancel"}</button>`;
   }
+  if (s.type === "libImport") {
+    body = `<h2>Build the menu library</h2><div class="meta">Reads every menu folder in your Drive and saves the menus, recipes, prep lists and grocery lists to your Firebase. It can take 10 to 20 minutes, so a computer on Wi-Fi is best. The screen stays on while it runs.</div>
+      ${IMP.running || s.done ? `<div class="status ${s.err ? "err" : ""}"><b>${esc(s.progress || "Starting…")}</b></div>
+        ${(s.log || []).length ? `<ul class="loglist">${s.log.map(l => `<li>${esc(l)}</li>`).join("")}</ul>` : ""}
+        ${IMP.running ? `<div class="actions"><button class="btn ghost" data-act="lib-import-stop">${IMP.stop ? "Stopping after this menu…" : "Stop"}</button></div>` : `<div class="actions"><button class="btn" data-act="close">Done</button></div>`}`
+      : `<form data-form="libimport">
+        <label class="field">Folder with your menu folders<input id="liRoot" value="${esc(s.root || "substack_pdfs")}"></label>
+        <label class="field">Folder of re-uploaded recipes (optional)<input id="liRe" value="${esc(s.re ?? "_reupload")}"></label>
+        <label class="toggle"><input type="checkbox" id="liRedo"> Re-import menus already in the library</label>
+        ${s.err && s.progress ? `<div class="status err">${esc(s.progress)}</div>` : ""}
+        <div class="actions"><button class="btn" type="submit">Start import</button><button class="btn plain" type="button" data-act="close">Cancel</button></div></form>`}`;
+  }
+  if (s.type === "lib") {
+    body = `<h2>${s.mode === "recipes" ? "Recipe library" : "Menus"}</h2>
+      <div class="seg" role="group" aria-label="Show"><button data-act="lib-mode" data-v="menus" aria-pressed="${s.mode !== "recipes"}">Menus</button><button data-act="lib-mode" data-v="recipes" aria-pressed="${s.mode === "recipes"}">Recipes</button></div>
+      <input id="libQ" class="search" type="search" placeholder="${s.mode === "recipes" ? "Search recipes" : "Search menus, dishes or seasons"}" autocomplete="off" value="${esc(s.q || "")}" aria-label="Search the library">
+      ${LIB.err ? `<div class="status err">${esc(LIB.err)}</div>` : ""}
+      <div id="libList">${libListHtml(s)}</div>
+      <button class="btn plain" data-act="close" style="width:100%">Close</button>`;
+  }
+  if (s.type === "libMenu") {
+    const m = LIB.menus[s.id];
+    if (!m) body = `<h2>Loading…</h2><div class="status">${esc(s.msg || "Getting this menu")}</div><button class="btn plain" data-act="lib-back">Back</button>`;
+    else {
+      const mains = m.recipes.map((r, i) => ({r, i})).filter(x => x.r.main), parts = m.recipes.map((r, i) => ({r, i})).filter(x => !x.r.main);
+      const row = ({r, i}) => `<li><div class="grow"><button class="linkname" data-act="lib-recipe" data-m="${esc(m.id)}" data-i="${i}"><span class="name">${esc(r.name)}</span></button>${r.desc ? `<div class="sub">${esc(r.desc)}</div>` : ""}</div></li>`;
+      body = `${m.season ? `<div class="season">${esc(m.season)}</div>` : ""}<h2>${esc(m.name)}</h2>
+        <div class="meta">${mains.length} meals · ${parts.length} sauces &amp; components${m.prep.length ? ` · ${m.prep.length} prep steps` : ""}${m.grocery.length ? ` · ${m.grocery.filter(g => !g.essential && !g.extra).length} grocery items` : ""}</div>
+        <div class="actions" style="margin-bottom:10px"><button class="btn" data-act="lib-use-open">Use this menu</button></div>
+        ${mains.length ? `<div class="section-h"><h2>Meals</h2></div><ul class="ing">${mains.map(row).join("")}</ul>` : ""}
+        ${parts.length ? `<div class="section-h"><h2>Sauces &amp; components</h2></div><ul class="ing">${parts.map(row).join("")}</ul>` : ""}
+        ${m.prep.length ? `<div class="section-h"><h2>Prep list</h2></div><ul class="ing">${m.prep.map(t => `<li><div class="grow"><div class="name">${esc(t.text)}</div>${t.for ? `<div class="sub">${esc(t.for)}</div>` : ""}${t.detail && t.detail.length ? `<ul class="detail">${t.detail.map(d => `<li>${esc(d)}</li>`).join("")}</ul>` : ""}</div></li>`).join("")}</ul>` : ""}
+        ${m.grocery.length ? `<div class="section-h"><h2>Grocery list</h2></div><ul class="ing">${m.grocery.filter(g => !g.extra).map(g => `<li><div class="grow"><span class="num">${esc(qtyStr(g.qty, g.unit))}</span> ${esc(g.name)}${g.note && !/^[\d\s./½¼¾⅓⅔]+[a-z]*$/i.test(g.note) ? ` <span class="sub">(${esc(g.note)})</span>` : ""}</div>${g.essential ? `<span class="sub">staple</span>` : ""}</li>`).join("")}</ul>` : ""}
+        <button class="btn plain" data-act="lib-back" style="width:100%">Back to menus</button>`;
+    }
+  }
+  if (s.type === "libUse") {
+    const m = LIB.menus[s.id], mains = m.recipes.filter(r => r.main).length;
+    const weeks = [0, 1, 2].map(k => addDays(mondayOf(new Date()), k * 7));
+    const days = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
+    const items = m.grocery.filter(g => !g.extra), staples = items.filter(g => g.essential).length;
+    body = `<h2>Use ${esc(m.name)}</h2><div class="meta">Copies its ${m.recipes.length} recipes into your recipes and fills in the week.</div>
+      <form data-form="libuse">
+      <label class="field">Week<select id="luWeek">${weeks.map((w, k) => `<option value="${ymd(w)}" ${ymd(w) === s.week ? "selected" : ""}>${k === 0 ? "This week" : k === 1 ? "Next week" : "Week after"} (${w.toLocaleDateString(undefined, {month: "short", day: "numeric"})})</option>`).join("")}</select></label>
+      <label class="toggle"><input type="checkbox" id="luPlan" checked> Plan the ${mains} meal${mains === 1 ? "" : "s"}, one a day</label>
+      <div class="two-col"><label class="field">Starting<select id="luDay">${days.map((d, i) => `<option value="${i}">${d}</option>`).join("")}</select></label><label class="field">As<select id="luMeal"><option value="dinner">Dinner</option><option value="lunch">Lunch</option></select></label></div>
+      <label class="toggle"><input type="checkbox" id="luGroc" checked> Add the grocery list ${items.length ? `(${items.length - staples} items)` : "(built from the recipes)"}</label>
+      ${staples ? `<label class="toggle" style="padding-left:30px"><input type="checkbox" id="luStaples"> Include ${staples} pantry staples (oils, spices, salt…)</label>` : ""}
+      ${items.length ? `<label class="toggle" style="padding-left:30px"><input type="checkbox" id="luSkip" checked> Skip items already in my pantry</label>` : ""}
+      ${m.prep.length ? `<label class="toggle"><input type="checkbox" id="luPrep" checked> Add the ${m.prep.length}-step prep list to Meal prep</label>` : ""}
+      <div class="actions"><button class="btn" type="submit">Add to my week</button><button class="btn plain" type="button" data-act="lib-back-menu">Back</button></div></form>`;
+  }
+  if (s.type === "libRecipe") {
+    const m = LIB.menus[s.mid], r = m && m.recipes[s.i];
+    if (!r) body = `<h2>Loading…</h2><div class="status">${esc(s.msg || "Getting this recipe")}</div><button class="btn plain" data-act="close">Close</button>`;
+    else {
+      const mine = state.recipes.find(x => x.lib === `${m.id}:${s.i}` || x.name.toLowerCase() === r.name.toLowerCase());
+      body = `<div class="cat">${esc(r.cat || "")}</div><h2>${esc(r.name)}</h2><div class="meta">${m.loose ? "" : `From <b>${esc(m.name)}</b>`}${r.servings ? ` · serves ${esc(r.servings)}` : ""}${r.time ? ` · ${esc(r.time)}` : ""}</div>
+        ${r.desc ? `<p class="hint" style="margin-top:0">${esc(r.desc)}</p>` : ""}
+        <div class="actions two" style="margin-bottom:12px">${mine ? `<button class="btn ghost" data-act="open-r" data-id="${mine.id}">Open my copy</button>` : `<button class="btn" data-act="lib-add" data-m="${esc(m.id)}" data-i="${s.i}">Add to my recipes</button>`}<button class="btn ghost" data-act="lib-add-plan" data-m="${esc(m.id)}" data-i="${s.i}">Plan it</button></div>
+        <ul class="ing">${(r.ingredients || []).map(i => `<li><div class="grow"><span class="num">${esc(qtyStr(i.qty, i.unit))}</span> ${esc(i.name)}</div></li>`).join("")}</ul>
+        ${r.steps ? `<div class="steps">${esc(r.steps)}</div>` : ""}
+        <button class="btn plain" data-act="${s.from === "menu" ? "lib-back-menu" : "lib-back"}" style="width:100%">Back</button>`;
+    }
+  }
   if (s.type === "week") {
     const fmt = d => d.toLocaleDateString(undefined, {month: "short", day: "numeric"});
     const prev = addDays(ui.weekStart, -7), prevCount = daysOf(prev).reduce((n, d) => n + MEALS.reduce((a, m) => a + d[m].length, 0), 0);
@@ -1289,7 +1812,7 @@ function renderSheet(){
     body = `<h2>Prep day plan</h2><div class="meta">${tl.steps.length ? `About <b>${durText(tl.total)}</b>. Long hands-off jobs start first, and hands-on jobs fit in while they cook.` : "All prep tasks are done."}</div>
       <div class="timers" id="timers">${timersHtml()}</div>
       <div>${tl.steps.map(x => `<div class="tl-step ${x.t.done ? "done" : ""}"><div class="tl-time">${clockText(x.start)}</div>
-        <div class="grow"><div class="name">${esc(x.t.text)}</div>${x.t.for ? `<div class="sub">${esc(x.t.for)}</div>` : ""}
+        <div class="grow"><div class="name">${esc(x.t.text)}</div>${x.t.for ? `<div class="sub">${esc(x.t.for)}</div>` : ""}${x.t.detail && x.t.detail.length ? `<ul class="detail">${x.t.detail.map(d => `<li>${esc(d)}</li>`).join("")}</ul>` : ""}
         <div class="sub">${x.active} min hands-on${x.passive ? ` · ${durText(x.passive)} cooking` : ""}${x.note ? ` · ${esc(x.note)}` : ""}</div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">${x.passive ? `<button class="btn small ghost" data-act="timer-go" data-l="${esc(x.t.text)}" data-min="${x.passive}">Start ${durText(x.passive)} timer</button>` : ""}${x.t.batch ? `<button class="btn small" data-act="task-batch" data-id="${x.t.id}">Cook &amp; portion</button>` : ""}${x.t.id !== "pack" ? `<button class="btn small plain" data-act="tl-done" data-id="${x.t.id}">Mark done</button>` : ""}</div></div></div>`).join("")}</div>
       <form class="addbar" data-form="timer" style="margin-top:12px"><input id="tmMin" type="number" inputmode="numeric" min="1" placeholder="Custom timer (minutes)" aria-label="Custom timer minutes"><button class="btn ghost" type="submit">Start</button></form>
@@ -1399,6 +1922,9 @@ function renderSheet(){
         `<p class="hint" style="margin:0 0 8px">Share your list, pantry, plan and recipes with someone in your household. They sign in with their own email and see the same kitchen, and changes from both of you are merged.</p>`}
       <form class="addbar" data-form="share"><input id="shareEmail" type="email" placeholder="Their email" autocomplete="off" aria-label="Email to share with"><button class="btn ghost" type="submit" ${s.busy ? "disabled" : ""}>${sync.household ? "Add" : "Share"}</button></form>
       ${sync.household ? `<button class="btn plain" data-act="leave-share" style="color:var(--out)">${s.confirmLeave ? "Tap again to stop sharing" : "Stop sharing on my account"}</button>` : `<p class="hint" style="margin-top:-6px">They need a login first. See step 6 in the setup guide.</p>`}` : ""}
+      ${signedIn ? `<div class="section-h"><h2>Menu library</h2></div>
+      <p class="hint" style="margin:0 0 8px">${LIB.index ? `${LIB.index.menus.filter(m => !m.loose).length} menus in the library. ` : ""}Everyone who signs in to Kitchen Flow can browse it and use its menus.</p>
+      <div class="actions">${driveReady() ? `<button class="btn ghost" data-act="lib-import-open">${IMP.running ? "Import running… view progress" : "Build library from Google Drive"}</button>` : `<p class="hint">Connect Google Drive (setup guide, step 5) to build the library from your folders.</p>`}</div>` : ""}
       <div class="section-h"><h2>Backup</h2></div>
       <p class="hint" style="margin:0 0 10px">Save a copy of everything as a file, or restore one.</p>
       <div class="actions two"><button class="btn ghost" data-act="backup">Save backup</button><label class="btn ghost" style="text-align:center">Restore<input type="file" id="restoreFile" accept="application/json,.json" hidden></label></div>
@@ -1496,6 +2022,22 @@ document.addEventListener("submit", e => {
     (state.prep[weekKey()] ||= []).push({id: uid(), text: t, for: "", night: NIGHT_BEFORE.test(t), done: false});
     commit(); const again = $("#tAdd"); again && again.focus(); return;
   }
+  if (f === "libimport") {
+    const opts = {root: $("#liRoot").value.trim() || "substack_pdfs", reupload: $("#liRe").value.trim(), redo: $("#liRedo").checked};
+    if (!libReady()) { ui.sheet.err = true; ui.sheet.progress = "Sign in first; the library is saved to your Firebase."; renderSheet(); return; }
+    ui.sheet.root = opts.root; ui.sheet.re = opts.reupload; ui.sheet.err = false; ui.sheet.log = []; ui.sheet.progress = "Connecting to Google Drive…";
+    keepAwake(true); withDrive(() => importLibrary(opts)); renderSheet(); return;
+  }
+  if (f === "libuse") {
+    const s = ui.sheet, m = LIB.menus[s.id], ws = new Date($("#luWeek").value + "T12:00:00");
+    const o = {weekStart: mondayOf(ws), plan: $("#luPlan").checked, startDay: +$("#luDay").value, meal: $("#luMeal").value, grocery: $("#luGroc").checked,
+      staples: !!($("#luStaples") && $("#luStaples").checked), ignorePantry: !!($("#luSkip") && !$("#luSkip").checked), prep: !!($("#luPrep") && $("#luPrep").checked)};
+    undoSnap = clone(state);
+    const res = useMenu(m, o);
+    ui.sheet = null; ui.tab = "plan"; ui.weekStart = o.weekStart; window.scrollTo(0, 0);
+    commit(); toast([`${m.name} added`, res.planned ? `${res.planned} meals planned` : "", res.groc ? `${res.groc} on your list` : "", res.inStock ? `${res.inStock} already in stock` : "", res.prep ? `${res.prep} prep steps` : ""].filter(Boolean).join(" · "), true);
+    return;
+  }
   if (f === "share") { startSharing($("#shareEmail").value); return; }
   if (f === "rotation") {
     const name = $("#rotName").value.trim() || `Week of ${ui.weekStart.toLocaleDateString(undefined, {month: "short", day: "numeric"})}`;
@@ -1542,6 +2084,7 @@ document.addEventListener("submit", e => {
 
 document.addEventListener("input", e => {
   if (e.target.id === "pickQ" && ui.sheet) { ui.sheet.q = e.target.value; const l = $("#pickList"); if (l) l.innerHTML = pickListHtml(ui.sheet); }
+  if (e.target.id === "libQ" && ui.sheet) { ui.sheet.q = e.target.value; const l = $("#libList"); if (l) l.innerHTML = libListHtml(ui.sheet); }
   if (e.target.id === "cookQ") { ui.cookQ = e.target.value; const l = $("#cookList"); if (l) l.innerHTML = cookListHtml(); }
 });
 document.addEventListener("change", e => {
@@ -1623,6 +2166,27 @@ document.addEventListener("click", e => {
     case "por-inc": case "por-dec": s.portions = Math.max(0, s.portions + (a === "por-inc" ? 1 : -1)); renderSheet(); break;
     case "unshare": { state.memberEmails = (state.memberEmails || []).filter(e => e !== el.dataset.e); commit(`Stopped sharing with ${el.dataset.e}`); break; }
     case "leave-share": if (!s.confirmLeave) { s.confirmLeave = true; renderSheet(); } else { s.confirmLeave = false; stopSharing(); } break;
+    case "lib-browse": case "lib-recipes": {
+      if (!libReady()) { toast(sync.configured ? "Sign in to use the menu library." : "The menu library needs sync turned on (setup guide, step 1)."); break; }
+      const sh = {type: "lib", mode: a === "lib-recipes" ? "recipes" : "menus", q: ""}; openSheet(sh); LIB.err = "";
+      libIndex().then(() => { if (ui.sheet === sh) renderSheet(); }).catch(() => { LIB.err = "Couldn't load the library. Check your connection."; if (ui.sheet === sh) renderSheet(); });
+      break; }
+    case "lib-mode": s.mode = el.dataset.v; s.q = ""; renderSheet(); break;
+    case "lib-open": case "lib-back-menu": {
+      const id = a === "lib-open" ? el.dataset.m : (s.mid || s.id); const prev = a === "lib-open" ? s : s.prev;
+      const sh = {type: "libMenu", id, prev}; openSheet(sh);
+      if (!LIB.menus[id]) libMenu(id).then(m => { if (!m) sh.msg = "This menu isn't in the library anymore."; if (ui.sheet === sh) renderSheet(); }).catch(() => { sh.msg = "Couldn't load this menu. Check your connection."; if (ui.sheet === sh) renderSheet(); });
+      break; }
+    case "lib-back": openSheet(s.prev && s.prev.type === "lib" ? s.prev : (s.prev && s.prev.prev) || {type: "lib", mode: "menus", q: ""}); break;
+    case "lib-recipe": {
+      const mid = el.dataset.m, i = +el.dataset.i, sh = {type: "libRecipe", mid, i, from: s.type === "libMenu" ? "menu" : "list", prev: s.type === "libMenu" ? s.prev : s}; openSheet(sh);
+      if (!LIB.menus[mid]) libMenu(mid).then(() => { if (ui.sheet === sh) renderSheet(); }).catch(() => { sh.msg = "Couldn't load this recipe."; if (ui.sheet === sh) renderSheet(); });
+      break; }
+    case "lib-add": { const r = copyLibRecipe(LIB.menus[el.dataset.m], +el.dataset.i); commit(`${r.name} added to your recipes`); break; }
+    case "lib-add-plan": { const r = copyLibRecipe(LIB.menus[el.dataset.m], +el.dataset.i); commit(); openSheet({type: "planDay", id: r.id, meal: "dinner"}); break; }
+    case "lib-use-open": openSheet({type: "libUse", id: s.id, week: ymd(ui.weekStart), prev: s.prev}); break;
+    case "lib-import-open": openSheet(IMP.running && IMP.sheet ? IMP.sheet : {type: "libImport"}); break;
+    case "lib-import-stop": IMP.stop = true; renderSheet(); break;
     case "week-tools": openSheet({type: "week"}); break;
     case "copy-last": { const n = copyWeekInto(daysOf(addDays(ui.weekStart, -7))); ui.sheet = null; commit(n ? `Copied ${n} meal${n === 1 ? "" : "s"} from last week` : "Those meals are already planned"); break; }
     case "rot-use": { const rt = (state.rotations || []).find(x => x.id === id); if (rt) { const n = copyWeekInto(rt.days); ui.sheet = null; commit(`Added ${n} meal${n === 1 ? "" : "s"} from "${rt.name}"`); } break; }
