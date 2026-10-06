@@ -352,7 +352,7 @@ function seed(){
 }
 
 /* ---------- state + saving ---------- */
-const APP_VERSION = "1.5.1";
+const APP_VERSION = "1.5.2";
 let state = null, saveTimer = null;
 const sync = { configured: false, user: null, fb: null, auth: null, db: null, docRef: null, unsub: null, base: null, household: null };
 let commitSeq = 0, flushing = false;
@@ -1276,6 +1276,23 @@ async function importMenu(folder, extraFiles, vocab, step){
   return doc;
 }
 
+async function wipeLibrary(){
+  const s = ui.sheet; s.busy = true; s.msg = ""; s.err = false; renderSheet();
+  try {
+    const idx = await libIndex(true);
+    const ids = (idx ? idx.menus : []).map(m => m.id);
+    let n = 0;
+    for (const id of ids) { s.progress = `Deleting ${++n} of ${ids.length}…`; if (ui.sheet === s) renderSheet(); await sync.fb.deleteDoc(libDoc("m-" + id)); }
+    await sync.fb.deleteDoc(libDoc("index"));
+    LIB.index = {menus: []}; LIB.menus = {};
+    s.busy = false; ui.sheet = null; render(); toast(`Menu library deleted (${ids.length} menus)`);
+  } catch (e) {
+    s.busy = false; s.err = true;
+    s.msg = e && e.code === "permission-denied" ? "Only the library's owner can delete it (your database rules don't allow this account)." : "Couldn't delete everything. Check your connection and try again; it picks up where it stopped.";
+    if (ui.sheet === s) renderSheet();
+  }
+}
+
 /* ---------- menu library: using it ---------- */
 function libMatches(m, q){
   if (!q) return true;
@@ -1500,7 +1517,7 @@ function renderList(){
       <div class="grow"><div class="name">${esc(g.name)}</div><div class="sub num">${esc(qtyStr(g.qty,g.unit))}${g.auto ? ` · <span style="color:var(--accent);font-weight:700">staple</span>` : ""}</div></div>
       <button class="x" data-act="del-g" data-id="${g.id}" aria-label="Remove ${esc(g.name)}">×</button></li>`).join("") + `</ul>`;
   }
-  return h + `<p class="hint">Checking an item off moves it to your pantry.</p>`;
+  return h + `<p class="hint">Checking an item off moves it to your pantry.</p><div class="actions" style="margin-top:4px"><button class="btn plain" data-act="clear-list" style="color:var(--out)">Clear the whole list</button></div>`;
 }
 
 function ageDays(d){ return Math.max(0, Math.round((new Date(ymd(new Date()) + "T12:00:00") - new Date(d + "T12:00:00")) / 864e5)); }
@@ -1811,6 +1828,24 @@ function renderSheet(){
       <div id="pickList">${pickListHtml(s)}</div>
       <button class="btn ${s.added && s.added.length ? "" : "plain"}" data-act="close" style="width:100%;margin-top:4px">${s.added && s.added.length ? "Done" : "Cancel"}</button>`;
   }
+  if (s.type === "wipe") {
+    const n = {grocery: state.grocery.length, pantry: state.pantry.length + state.prepped.length, plan: Object.values(state.plan).reduce((a, d) => a + MEALS.reduce((b, m) => b + (d[m] || []).length, 0), 0), recipes: state.recipes.length};
+    const box = (id, label, sub) => `<label class="toggle"><input type="checkbox" id="${id}" ${s.sel[id] ? "checked" : ""} data-act="wipe-sel"> <span>${label}${sub ? ` <span class="sub">${sub}</span>` : ""}</span></label>`;
+    body = `<h2>Clear my kitchen</h2><div class="meta">Choose what to remove. This only affects your kitchen${sync.household ? " (and everyone you share it with)" : ""}, not the menu library.</div>
+      ${box("grocery", "Grocery list", `${n.grocery} items`)}
+      ${box("pantry", "Pantry and prepped portions", `${n.pantry} items`)}
+      ${box("plan", "Meal plans, prep lists and rotations", `${n.plan} planned meals`)}
+      ${box("recipes", "Recipes", `${n.recipes} recipes`)}
+      ${box("history", "Buy-again history", "")}
+      <div class="actions" style="margin-top:8px"><button class="btn" data-act="wipe-go" style="background:var(--out);color:#fff" ${Object.values(s.sel).some(Boolean) ? "" : "disabled"}>${s.confirm ? "Tap again to clear" : "Clear selected"}</button><button class="btn plain" data-act="close">Cancel</button></div>`;
+  }
+  if (s.type === "wipeLib") {
+    const count = (LIB.index ? LIB.index.menus.filter(m => !m.loose).length : 0);
+    body = `<h2>Delete the menu library</h2><div class="meta">Removes all ${count} menus and their recipes from the shared library <b>for everyone</b> who signs in. Recipes people already copied into their own kitchens stay. You can rebuild it from Google Drive anytime. This can't be undone.</div>
+      ${s.msg ? `<div class="status ${s.err ? "err" : ""}">${esc(s.msg)}</div>` : ""}
+      <label class="field">Type DELETE to confirm<input id="wlConfirm" autocomplete="off" autocapitalize="characters"></label>
+      <div class="actions"><button class="btn" data-act="wipe-lib-go" style="background:var(--out);color:#fff" ${s.busy ? "disabled" : ""}>${s.busy ? esc(s.progress || "Deleting…") : "Delete library"}</button><button class="btn plain" data-act="close">Cancel</button></div>`;
+  }
   if (s.type === "libImport") {
     body = `<h2>Build the menu library</h2><div class="meta">Reads every menu folder in your Drive and saves the menus, recipes, prep lists and grocery lists to your Firebase. It can take 10 to 20 minutes, so a computer on Wi-Fi is best. The screen stays on while it runs.</div>
       ${IMP.running || s.done ? `<div class="status ${s.err ? "err" : ""}"><b>${esc(s.progress || "Starting…")}</b></div>
@@ -2018,6 +2053,10 @@ function renderSheet(){
       <p class="hint" style="margin:0 0 10px">Saves each recipe as a Google Doc in a "Kitchen Flow Recipes" folder. Recipes already there are updated.</p>
       <div class="actions"><button class="btn ghost" data-act="drive-save-all" ${s.busy?"disabled":""}>${s.busy ? esc(s.progress || "Saving…") : `Save all ${state.recipes.length} recipes to Drive`}</button></div>` : ""}
       ${state.sample ? `<div class="section-h"><h2>Sample data</h2></div><div class="actions"><button class="btn ghost" data-act="clear-sample">Clear sample items</button></div>` : ""}
+      <div class="section-h"><h2>Start over</h2></div>
+      <p class="hint" style="margin:0 0 8px">Clear out your kitchen to start fresh. You can undo right after, and a backup is a good idea first.</p>
+      <div class="actions"><button class="btn ghost" data-act="wipe-open" style="color:var(--out)">Clear my kitchen…</button>
+      ${signedIn && LIB.index && LIB.index.menus.length ? `<button class="btn plain" data-act="wipe-lib-open" style="color:var(--out)">Delete the shared menu library…</button>` : ""}</div>
       <p class="hint" style="margin-top:18px">Kitchen Flow ${APP_VERSION}</p>
       <button class="btn plain" data-act="close">Done</button>`;
   }
@@ -2272,6 +2311,32 @@ document.addEventListener("click", e => {
     case "lib-use-open": openSheet({type: "libUse", id: s.id, week: ymd(ui.weekStart), prev: s.prev}); break;
     case "lib-import-open": openSheet(IMP.running && IMP.sheet ? IMP.sheet : {type: "libImport"}); break;
     case "lib-import-stop": IMP.stop = true; renderSheet(); break;
+    case "clear-list": {
+      if (!state.grocery.length) break;
+      undoSnap = clone(state); state.grocery = []; commit(); toast("Grocery list cleared", true); break; }
+    case "wipe-open": openSheet({type: "wipe", sel: {grocery: true, pantry: true, plan: true, recipes: true, history: true}}); break;
+    case "wipe-sel": s.sel[el.id] = el.checked; s.confirm = false; renderSheet(); break;
+    case "wipe-go": {
+      if (!s.confirm) { s.confirm = true; renderSheet(); break; }
+      const snap = clone(state), sel = s.sel;
+      if (sel.grocery) state.grocery = [];
+      if (sel.pantry) { state.pantry = []; state.prepped = []; }
+      if (sel.plan) { state.plan = {}; state.prep = {}; state.rotations = []; state.weekMenus = {}; }
+      if (sel.recipes) {
+        state.recipes = [];
+        // planned meals and portions of deleted recipes go too
+        state.plan = {}; state.prepped = []; state.weekMenus = {};
+        for (const wk of Object.keys(state.prep)) state.prep[wk].forEach(t => { t.recipes = []; delete t.batch; });
+      }
+      if (sel.history) state.bought = {};
+      state.sample = false;
+      undoSnap = snap; ui.sheet = null; ui.tab = "list"; window.scrollTo(0, 0);
+      commit(); toast("Kitchen cleared", true); break; }
+    case "wipe-lib-open": openSheet({type: "wipeLib"}); break;
+    case "wipe-lib-go": {
+      if (s.busy) break;
+      if (($("#wlConfirm").value || "").trim().toUpperCase() !== "DELETE") { s.msg = "Type DELETE in the box to confirm."; s.err = true; renderSheet(); break; }
+      wipeLibrary(); break; }
     case "task-make": { const t = (state.prep[weekKey()] || []).find(x => x.id === id); if (t && t.recipes && t.recipes[0]) startCook(t.recipes[0].id, {batch: true, taskId: t.id}); break; }
     case "week-tools": openSheet({type: "week"}); break;
     case "copy-last": { const n = copyWeekInto(daysOf(addDays(ui.weekStart, -7))); ui.sheet = null; commit(n ? `Copied ${n} meal${n === 1 ? "" : "s"} from last week` : "Those meals are already planned"); break; }
