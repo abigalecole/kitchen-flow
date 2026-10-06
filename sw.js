@@ -1,9 +1,9 @@
 // Kitchen Flow service worker: makes the app open offline.
 // Change VERSION whenever you upload a new index.html so phones pick it up.
-const VERSION = "kf-1.1";
+const VERSION = "kf-1.2";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./firebase-config.js",
   "./icons/icon-192.png", "./icons/icon-512.png", "./icons/apple-touch-icon.png"];
-const CDN = ["www.gstatic.com", "fonts.googleapis.com", "fonts.gstatic.com"];
+const CDN = ["www.gstatic.com", "fonts.googleapis.com", "fonts.gstatic.com", "cdnjs.cloudflare.com"];
 
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));

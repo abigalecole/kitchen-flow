@@ -160,6 +160,7 @@ label.field textarea{min-height:120px;resize:vertical}
 .toast{position:fixed;left:16px;right:16px;bottom:calc(84px + env(safe-area-inset-bottom,0px));z-index:30;margin:0 auto;max-width:600px;background:var(--ink);color:var(--bg);border-radius:14px;padding:12px 14px;display:flex;align-items:center;justify-content:space-between;gap:12px;box-shadow:var(--shadow);font-size:15px}
 .toast button{border:0;background:transparent;color:var(--bg);font-weight:700;text-decoration:underline;padding:4px}
 .sheet .section-h h2{font-size:13px;margin:0}
+.addrow{display:flex;flex-wrap:wrap;gap:8px;margin-block:4px 12px}
 .gear{border:0;background:transparent;color:var(--muted);width:36px;height:36px;border-radius:10px;display:grid;place-items:center;padding:0}
 .top-right{display:flex;align-items:center;gap:6px}
 #auth{position:fixed;inset:0;z-index:40;background:var(--bg);overflow:auto;padding:calc(40px + env(safe-area-inset-top,0px)) 20px 40px}
@@ -289,7 +290,7 @@ function seed(){
 }
 
 /* ---------- state + saving ---------- */
-const APP_VERSION = "1.1";
+const APP_VERSION = "1.2";
 let state = null, saveTimer = null;
 const sync = { configured: false, user: null, fb: null, auth: null, db: null, docRef: null, unsub: null };
 const localKey = () => KEY + ":" + (sync.user ? sync.user.uid : "device");
@@ -373,9 +374,19 @@ function parseRecipeText(text){
   let ingRaw;
   if (iIdx >= 0) ingRaw = lines.slice(iIdx + 1, sIdx > iIdx ? sIdx : undefined);
   else ingRaw = lines.slice(1, sIdx > 0 ? sIdx : undefined).filter(l => /^[\d½¼¾⅓⅔]/.test(l));
+  // a line with an unclosed "(" continues on the next line
+  ingRaw = ingRaw.reduce((out, l) => {
+    const prev = out[out.length - 1];
+    if (prev != null && (prev.match(/\(/g) || []).length > (prev.match(/\)/g) || []).length) out[out.length - 1] = prev + " " + l;
+    else out.push(l);
+    return out; }, []);
   const ingredients = ingRaw.filter(l => l && !/:$/.test(l) && !/^(makes|serves)\b/i.test(l) && !/^\*/.test(l) && !/prepped ahead|^notes?\b/i.test(l))
     .map(cleanIngredient).filter(l => l.length > 1).map(l => { const p = parseLine(l); p.name = p.name.toLowerCase(); return p; }).filter(p => p.name);
-  const steps = sIdx >= 0 ? lines.slice(sIdx + 1).filter(Boolean).join("\n") : "";
+  let stepLines = sIdx >= 0 ? lines.slice(sIdx + 1).filter(Boolean) : [];
+  if (stepLines.some(l => /^\d+[.)]\s/.test(l))) stepLines = stepLines.reduce((out, l) => {
+    if (/^\d+[.)]\s/.test(l) || !out.length || /^[A-Z][A-Z ]+:?$/.test(l)) out.push(l); else out[out.length - 1] += " " + l;
+    return out; }, []);
+  const steps = stepLines.join("\n");
   return { name, servings: sv ? +sv[1] : null, time: "", ingredients, steps };
 }
 
@@ -432,6 +443,180 @@ async function importFromLink(raw){
     s.msg = e && e.msg ? e.msg : "Couldn't reach the link helper. Check your connection and try again.";
     if (ui.sheet === s) renderSheet();
   }
+}
+
+/* ---------- Google Drive ---------- */
+const DRIVE_SCOPES = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file";
+const FOLDER_NAME = "Kitchen Flow Recipes";
+const G = { token: null, exp: 0, client: null, pending: null };
+const driveReady = () => !!(window.GOOGLE_CLIENT_ID && !/PASTE/i.test(window.GOOGLE_CLIENT_ID));
+function sheetMsg(msg, err){ const s = ui.sheet; if (!s) { if (msg) toast(msg); return; } s.busy = false; if (s.type === "drive") { s.err = err ? msg : ""; } else { s.msg = msg; s.err = !!err; } renderSheet(); }
+function loadScript(src){ return new Promise((ok, bad) => { const el = document.createElement("script"); el.src = src; el.async = true; el.onload = ok; el.onerror = bad; document.head.appendChild(el); }); }
+function initGoogle(){
+  if (!driveReady()) return;
+  loadScript("https://accounts.google.com/gsi/client").then(() => {
+    G.client = google.accounts.oauth2.initTokenClient({
+      client_id: window.GOOGLE_CLIENT_ID, scope: DRIVE_SCOPES,
+      callback: resp => {
+        if (resp.error) { G.pending = null; sheetMsg(resp.error === "access_denied" ? "Google Drive access wasn't allowed." : "Google sign-in didn't finish. Try again.", true); return; }
+        G.token = resp.access_token; G.exp = Date.now() + (resp.expires_in || 3600) * 1000;
+        const fn = G.pending; G.pending = null; fn && fn();
+      },
+      error_callback: err => {
+        G.pending = null;
+        sheetMsg(err && err.type === "popup_failed_to_open"
+          ? "The Google sign-in window was blocked. On iPhone, open Kitchen Flow in Safari instead of from the home screen icon to use Drive. Recipes you import still sync to the app."
+          : "Google sign-in was closed before it finished.", true);
+      },
+    });
+  }).catch(() => {});
+}
+function withDrive(fn){
+  if (G.token && Date.now() < G.exp - 60000) return fn();
+  if (!navigator.onLine) { sheetMsg("You're offline. Connect to the internet to use Google Drive.", true); return; }
+  if (!G.client) { sheetMsg("Google sign-in is still loading. Try again in a moment.", true); return; }
+  G.pending = fn;
+  G.client.requestAccessToken({prompt: ""});
+}
+async function gfetch(url, opts = {}){
+  const res = await fetch(url, {...opts, headers: {...(opts.headers || {}), Authorization: "Bearer " + G.token}});
+  if (res.status === 401) { G.token = null; throw {msg: "Your Google sign-in expired. Tap again to reconnect."}; }
+  if (!res.ok) {
+    let j = {}; try { j = await res.json(); } catch {}
+    const reason = j?.error?.errors?.[0]?.reason || j?.error?.status || "";
+    if (/accessNotConfigured|SERVICE_DISABLED/i.test(reason) || /has not been used|is disabled/i.test(j?.error?.message || ""))
+      throw {msg: "The Google Drive API is turned off in your Google Cloud project. Turn it on (setup guide, step 5.1) and try again."};
+    if (res.status === 404) throw {code: 404, msg: "That file isn't in your Drive anymore."};
+    if (res.status === 403) throw {msg: "Google Drive said no to that request. " + (j?.error?.message || "")};
+    throw {msg: "Google Drive didn't respond. Try again in a moment."};
+  }
+  return res;
+}
+const DAPI = "https://www.googleapis.com/drive/v3/files";
+async function driveSearch(q){
+  const s = ui.sheet; if (!s) return;
+  s.busy = true; s.err = ""; renderSheet();
+  const term = String(q || "").trim().replace(/\\/g, "").replace(/'/g, "\\'");
+  const kinds = "(mimeType = 'application/pdf' or mimeType = 'application/vnd.google-apps.document')";
+  const query = (term ? `(name contains '${term}' or fullText contains '${term}') and ` : "") + kinds + " and trashed = false";
+  try {
+    const r = await gfetch(`${DAPI}?q=${encodeURIComponent(query)}&pageSize=30&fields=${encodeURIComponent("files(id,name,mimeType,modifiedTime,parents)")}${term ? "" : "&orderBy=modifiedTime desc"}`);
+    const files = (await r.json()).files || [];
+    // Many files share a name, so show each file's folder too.
+    const parents = [...new Set(files.map(f => f.parents?.[0]).filter(Boolean))];
+    const names = {};
+    await Promise.all(parents.map(id => gfetch(`${DAPI}/${id}?fields=name`).then(x => x.json()).then(j => { names[id] = j.name; }).catch(() => {})));
+    files.forEach(f => { const n = names[f.parents?.[0]]; f.folder = n && n !== "My Drive" ? n : ""; });
+    s.files = files;
+  } catch (e) { s.err = e.msg || "Couldn't search your Drive."; }
+  s.busy = false; if (ui.sheet === s) renderSheet();
+}
+let pdfjsReady = null;
+function loadPdfJs(){
+  if (!pdfjsReady) pdfjsReady = loadScript("https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js").then(() => {
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+    return window.pdfjsLib; });
+  return pdfjsReady;
+}
+async function pdfText(buf){
+  const lib = await loadPdfJs();
+  const doc = await lib.getDocument({data: buf}).promise;
+  let out = "";
+  for (let i = 1; i <= doc.numPages; i++) {
+    const page = await doc.getPage(i);
+    const tc = await page.getTextContent();
+    for (const it of tc.items) { out += it.str; if (it.hasEOL) out += "\n"; }
+    out += "\n";
+  }
+  return out;
+}
+const isTitle = l => l.length > 4 && /[A-Z]{3}/.test(l) && l === l.toUpperCase() && !/^[\d½¼¾⅓⅔]/.test(l) && !/^(INGREDIENTS|INSTRUCTIONS|DIRECTIONS|NOTES?|TO COOK|STEPS)\b/.test(l);
+function splitRecipes(text){
+  const lines = String(text).replace(/\r/g, "").split("\n").map(l => l.replace(/\s+/g, " ").trim())
+    .filter(l => !/google docs\s*$|^\d+\s*\/\s*\d+$|^https?:\/\/|^\d{1,2}\/\d{1,2}\/\d{2,4}/i.test(l));
+  const starts = [];
+  lines.forEach((l, i) => {
+    if (!isTitle(l)) return;
+    const next = lines.slice(i + 1).filter(Boolean).slice(0, 3);
+    if (next.some(n => /^(makes|serves|yield)\b/i.test(n) || /^ingredients\b/i.test(n))) starts.push(i);
+  });
+  const chunks = starts.length ? starts.map((st, k) => lines.slice(st, starts[k + 1] ?? lines.length).join("\n")) : [lines.join("\n")];
+  return chunks.map(parseRecipeText).filter(r => r.name && r.ingredients.length);
+}
+async function driveRead(f){
+  const s = ui.sheet; if (!s || !f) return;
+  s.phase = "reading"; s.file = f; s.err = ""; renderSheet();
+  try {
+    let text;
+    if (f.mimeType === "application/vnd.google-apps.document") text = await (await gfetch(`${DAPI}/${f.id}/export?mimeType=text/plain`)).text();
+    else text = await pdfText(await (await gfetch(`${DAPI}/${f.id}?alt=media`)).arrayBuffer());
+    const found = splitRecipes(text);
+    if (!found.length) { s.phase = "search"; s.err = "Couldn't find a recipe in that file. Open it, copy one recipe's text, and use Add from link → paste the text."; }
+    else { s.phase = "review"; s.found = found; s.sel = found.map(r => r.ingredients.length >= 3); }
+  } catch (e) {
+    console.warn("Drive read failed", e);
+    s.phase = "search"; s.err = e.msg || "Couldn't read that file. If it's a scanned image, copy the recipe text instead.";
+  }
+  if (ui.sheet === s) renderSheet();
+}
+async function ensureFolder(){
+  if (state.driveFolderId) {
+    try { const j = await (await gfetch(`${DAPI}/${state.driveFolderId}?fields=id,trashed`)).json(); if (!j.trashed) return state.driveFolderId; }
+    catch (e) { if (e.code !== 404) throw e; }
+  }
+  const q = `name = '${FOLDER_NAME}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+  const found = (await (await gfetch(`${DAPI}?q=${encodeURIComponent(q)}&fields=files(id)`)).json()).files || [];
+  let id = found[0]?.id;
+  if (!id) id = (await (await gfetch(`${DAPI}?fields=id`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: FOLDER_NAME, mimeType: "application/vnd.google-apps.folder"})})).json()).id;
+  state.driveFolderId = id;
+  return id;
+}
+function recipeHtml(r){
+  const n = r.nutr, e = esc;
+  return `<html><body><h1>${e(r.name)}</h1>
+<p>${[r.servings ? `Serves ${e(r.servings)}` : "", e(r.time || "")].filter(Boolean).join(" · ")}</p>
+${n ? `<p>Per serving: ${nf(n.cal)} cal · ${nf(n.protein)}g protein · ${nf(n.carbs)}g carbs · ${nf(n.fat)}g fat (${srcLabel(n)})</p>` : ""}
+<h2>Ingredients</h2><ul>${ingLines(r).map(l => `<li>${e(l)}</li>`).join("")}</ul>
+${r.steps ? `<h2>Steps</h2>${r.steps.split("\n").filter(Boolean).map(l => `<p>${e(l)}</p>`).join("")}` : ""}
+${r.url ? `<p>Source: <a href="${e(r.url)}">${e(r.url)}</a></p>` : ""}
+<p><i>Saved from Kitchen Flow</i></p></body></html>`;
+}
+async function uploadRecipe(r, folderId){
+  const boundary = "kf" + uid();
+  const meta = r.drive?.id ? {name: r.name} : {name: r.name, mimeType: "application/vnd.google-apps.document", parents: [folderId]};
+  const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${boundary}\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n${recipeHtml(r)}\r\n--${boundary}--`;
+  const opts = {method: r.drive?.id ? "PATCH" : "POST", headers: {"Content-Type": `multipart/related; boundary=${boundary}`}, body};
+  const url = r.drive?.id ? `https://www.googleapis.com/upload/drive/v3/files/${r.drive.id}?uploadType=multipart&fields=id,webViewLink`
+                          : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink`;
+  try {
+    const j = await (await gfetch(url, opts)).json();
+    r.drive = {id: j.id, url: j.webViewLink || `https://docs.google.com/document/d/${j.id}/edit`};
+  } catch (e) {
+    if (e.code === 404 && r.drive?.id) { r.drive = null; return uploadRecipe(r, folderId); } // doc was deleted: make a new one
+    throw e;
+  }
+}
+async function driveSaveOne(r){
+  const s = ui.sheet; if (!s || !r) return;
+  s.busy = true; s.msg = ""; renderSheet();
+  try {
+    const was = !!r.drive;
+    await uploadRecipe(r, await ensureFolder());
+    s.busy = false; commit(was ? "Updated in Google Drive" : "Saved to Google Drive");
+  } catch (e) { sheetMsg(e.msg || "Couldn't save to Google Drive.", true); }
+}
+async function driveSaveAll(){
+  const s = ui.sheet; if (!s) return;
+  s.busy = true; s.msg = ""; renderSheet();
+  let done = 0;
+  try {
+    const folder = await ensureFolder();
+    for (const r of state.recipes) {
+      s.progress = `Saving ${done + 1} of ${state.recipes.length}…`; if (ui.sheet === s) renderSheet();
+      await uploadRecipe(r, folder); done++;
+    }
+    s.busy = false; s.msg = `Saved ${done} recipes to the "${FOLDER_NAME}" folder in your Drive.`; s.err = false; commit();
+  } catch (e) { if (done) commit(); sheetMsg((e.msg || "Couldn't save to Google Drive.") + (done ? ` ${done} saved before it stopped.` : ""), true); }
 }
 
 /* ---------- backup ---------- */
@@ -562,10 +747,11 @@ function renderCook(){
     .sort((a,b) => a.m.missing.length - b.m.missing.length || b.m.have - a.m.have);
   const f = ui.cookFilter;
   const shown = scored.filter(x => f === "all" || (f === "ready" ? x.m.missing.length === 0 : x.m.missing.length > 0 && x.m.missing.length <= 2));
-  let h = `<div class="filters" role="group" aria-label="Filter recipes">
+  let h = `<div class="addrow">${driveReady() ? `<button class="btn small ghost" data-act="drive-open">From Drive</button>` : ""}<button class="btn small ghost" data-act="paste-open">Add from link</button><button class="btn small ghost" data-act="new-r">+ New</button></div>
+  <div class="filters" role="group" aria-label="Filter recipes">
     ${[["all","All recipes"],["ready","Ready now"],["almost","Missing 1–2"]].map(([k,l]) => `<button data-act="filter" data-f="${k}" aria-pressed="${f===k}">${l}</button>`).join("")}
   </div>
-  <div class="section-h"><h2>Your recipes</h2><span><button class="btn small plain" data-act="paste-open">Add from link</button><button class="btn small plain" data-act="new-r">+ New</button></span></div>`;
+  <div class="section-h"><h2>Your recipes</h2><span class="num">${state.recipes.length}</span></div>`;
   if (!shown.length) h += `<div class="empty">${state.recipes.length ? "No recipes match this filter." : "No recipes yet. Tap Add from link to bring one in from a recipe site, or paste text from a PDF."}</div>`;
   h += shown.map(({r,m}) => `<button class="rcard" data-act="open-r" data-id="${r.id}">
     <h3>${esc(r.name)}</h3><div class="sub">${esc(r.time||"")}${r.time?" · ":""}<span class="num">${m.have} of ${m.total}</span> ingredients in stock${r.nutr?` · <span class="num">${nf(r.nutr.cal)} cal · ${nf(r.nutr.protein)}g protein</span>`:""}</div>
@@ -588,6 +774,8 @@ function renderSheet(){
       ${r.nutr ? nutrGrid(r.nutr) + `<div class="src">Per serving · ${srcLabel(r.nutr)}</div>` : `<div class="src">No macros yet.</div>`}
       ${s.msg ? `<div class="status ${s.err?"err":""}">${esc(s.msg)}</div>` : ""}
       <div class="actions two" style="margin-bottom:14px"><button class="btn ghost" data-act="mf-card" data-id="${r.id}">MacroFactor card</button><button class="btn ghost" data-act="nutr-edit" data-id="${r.id}">Enter my macros</button></div>
+      ${driveReady() ? `${s.msg ? `<div class="status ${s.err?"err":""}">${esc(s.msg)}</div>` : ""}
+      <div class="actions two" style="margin:-6px 0 14px"><button class="btn ghost" data-act="drive-save" data-id="${r.id}" ${s.busy?"disabled":""}>${s.busy ? "Saving…" : r.drive ? "Update in Drive" : "Save to Drive"}</button>${r.drive?.url ? `<a class="btn plain" style="text-align:center" href="${esc(r.drive.url)}" target="_blank" rel="noopener">Open in Drive</a>` : ""}</div>` : ""}
       <ul class="ing">${r.ingredients.map(i => { const st = ingStatus(i);
         const note = st.k==="have" ? `have ${qtyStr(st.p.qty, st.p.unit)}` : st.k==="low" ? `only ${qtyStr(st.p.qty, st.p.unit)}` : st.k==="miss" ? "not in stock" : "staple";
         return `<li><span class="dot ${st.k}"></span><div class="grow"><span class="num">${esc(qtyStr(i.qty,i.unit))}</span> ${esc(i.name)}</div><span class="sub">${esc(note)}</span></li>`; }).join("")}</ul>
@@ -651,6 +839,26 @@ function renderSheet(){
       <form data-form="paste"><label class="field">Recipe text<textarea id="pText" style="min-height:220px" placeholder="White Chicken Chili&#10;Makes 2 servings&#10;Ingredients&#10;2 (8-9 oz) chicken breast&#10;1 can cannellini beans&#10;...&#10;Instructions&#10;1. ..."></textarea></label>
       <div class="actions"><button class="btn" type="submit">Read recipe</button><button class="btn plain" type="button" data-act="close">Cancel</button></div></form>`;
   }
+  if (s.type === "drive") {
+    if (s.phase === "reading") {
+      body = `<h2>Reading file</h2><div class="meta">${esc(s.file.name)}</div><div class="status">Pulling the recipes out of this file…</div>`;
+    } else if (s.phase === "review") {
+      const n = s.sel.filter(Boolean).length;
+      body = `<h2>Pick recipes to import</h2><div class="meta">Found ${s.found.length} in ${esc(s.file.name)}. You can fix any details after importing.</div>
+        <ul class="ing">${s.found.map((r,i) => { const dup = state.recipes.some(x => x.name.toLowerCase() === r.name.toLowerCase());
+          return `<li><input type="checkbox" id="imp${i}" data-act="imp-sel" data-i="${i}" ${s.sel[i]?"checked":""} style="width:20px;height:20px;accent-color:var(--accent)">
+          <label for="imp${i}" class="grow"><div class="name">${esc(r.name)}</div><div class="sub">${r.ingredients.length} ingredients${r.servings?` · serves ${r.servings}`:""}${dup?" · already in your recipes":""}</div></label></li>`; }).join("")}</ul>
+        <div class="actions"><button class="btn" data-act="imp-go" ${n?"":"disabled"}>Import ${n} recipe${n===1?"":"s"}</button><button class="btn plain" data-act="drive-back">Choose a different file</button></div>`;
+    } else {
+      body = `<h2>Recipes from Google Drive</h2><div class="meta">Search your Drive for a PDF or Google Doc. Each recipe inside becomes its own recipe here.</div>
+        <form class="addbar" data-form="drive"><input id="dQ" value="${esc(s.q||"")}" placeholder="Search your Drive" aria-label="Search Google Drive" enterkeyhint="search"><button class="btn" type="submit" ${s.busy?"disabled":""}>Search</button></form>
+        ${s.err ? `<div class="status err">${esc(s.err)}</div>` : ""}
+        ${s.busy ? `<div class="status">Searching your Drive…</div>` : ""}
+        ${(s.files||[]).map((f,i) => `<button class="rcard" data-act="drive-pick" data-i="${i}">${f.folder?`<div class="season">${esc(f.folder)}</div>`:""}<h3>${esc(f.name)}</h3><div class="sub">${f.mimeType==="application/pdf"?"PDF":"Google Doc"}${f.modifiedTime?` · edited ${esc(new Date(f.modifiedTime).toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric"}))}`:""}</div></button>`).join("")}
+        ${s.files && !s.files.length && !s.busy ? `<div class="empty">No matching PDFs or Google Docs. Try another word, like a dish name.</div>` : ""}
+        <button class="btn plain" data-act="close">Close</button>`;
+    }
+  }
   if (s.type === "settings") {
     const signedIn = !!sync.user;
     body = `<h2>Settings</h2>
@@ -661,6 +869,9 @@ function renderSheet(){
       <p class="hint" style="margin:0 0 10px">Save a copy of everything as a file, or restore one.</p>
       <div class="actions two"><button class="btn ghost" data-act="backup">Save backup</button><label class="btn ghost" style="text-align:center">Restore<input type="file" id="restoreFile" accept="application/json,.json" hidden></label></div>
       ${s.msg ? `<div class="status ${s.err?"err":""}">${esc(s.msg)}</div>` : ""}
+      ${driveReady() ? `<div class="section-h"><h2>Google Drive</h2></div>
+      <p class="hint" style="margin:0 0 10px">Saves each recipe as a Google Doc in a "Kitchen Flow Recipes" folder. Recipes already there are updated.</p>
+      <div class="actions"><button class="btn ghost" data-act="drive-save-all" ${s.busy?"disabled":""}>${s.busy ? esc(s.progress || "Saving…") : `Save all ${state.recipes.length} recipes to Drive`}</button></div>` : ""}
       ${state.sample ? `<div class="section-h"><h2>Sample data</h2></div><div class="actions"><button class="btn ghost" data-act="clear-sample">Clear sample items</button></div>` : ""}
       <p class="hint" style="margin-top:18px">Kitchen Flow ${APP_VERSION}</p>
       <button class="btn plain" data-act="close">Done</button>`;
@@ -711,6 +922,7 @@ document.addEventListener("submit", e => {
     const inp2 = f === "grocery" ? $("#gAdd") : $("#pAdd"); inp2 && inp2.focus();
   }
   if (f === "link") { importFromLink($("#pUrl").value); return; }
+  if (f === "drive") { const q = $("#dQ").value; ui.sheet.q = q; withDrive(() => driveSearch(q)); return; }
   if (f === "paste") { const d = parseRecipeText($("#pText").value); if (!d.name && !d.ingredients.length) return; openSheet({type:"editR", draft: d}); return; }
   if (f === "auth") { authSubmit(e.submitter?.dataset.mode || "in"); return; }
   if (f === "nutr") {
@@ -801,6 +1013,20 @@ document.addEventListener("click", e => {
     case "auth-local": hideAuth(); try { localStorage.setItem(KEY + ":local-only", "1"); } catch {} setSync("On this device"); break;
     case "auth-reset": authReset(); break;
     case "backup": doBackup(); break;
+    case "drive-open": openSheet({type:"drive", phase:"search", q:"recipe"}); withDrive(() => driveSearch("recipe")); break;
+    case "drive-pick": { const f = s.files[el.dataset.i]; withDrive(() => driveRead(f)); break; }
+    case "drive-back": s.phase = "search"; renderSheet(); break;
+    case "imp-sel": s.sel[el.dataset.i] = el.checked; renderSheet(); break;
+    case "imp-go": {
+      let added = 0, skipped = 0;
+      s.found.forEach((x, i) => { if (!s.sel[i]) return;
+        if (state.recipes.some(r => r.name.toLowerCase() === x.name.toLowerCase())) { skipped++; return; }
+        state.recipes.push({id: uid(), name: x.name, time: x.time || "", servings: x.servings || null, ingredients: x.ingredients, steps: x.steps, source: {driveId: s.file.id, file: s.file.name}});
+        added++; });
+      ui.sheet = null; commit(`Imported ${added} recipe${added===1?"":"s"}` + (skipped ? ` · ${skipped} already saved` : ""));
+      break; }
+    case "drive-save": if (!s.busy) { const r = state.recipes.find(x => x.id === id); withDrive(() => driveSaveOne(r)); } break;
+    case "drive-save-all": if (!s.busy) withDrive(driveSaveAll); break;
     case "nutr-edit": openSheet({type:"nutrEdit", id}); break;
     case "mf-card": openSheet({type:"mf", id}); break;
     case "back-r": openSheet({type:"recipe", id}); break;
@@ -920,6 +1146,7 @@ async function boot(){
   }
 }
 boot();
+initGoogle();
 (() => {
   const q = new URLSearchParams(location.search);
   const shared = q.get("url") || q.get("text") || "";
