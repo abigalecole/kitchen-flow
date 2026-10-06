@@ -13,3 +13,4 @@ window.FIREBASE_CONFIG = {
 // Optional: your Cloudflare link helper address (setup guide, step 4),
 // e.g. "https://kitchen-flow-import.your-name.workers.dev"
 window.RECIPE_IMPORT_URL = "https://kitchen-flow-import.coleabbi923.workers.dev";
+window.GOOGLE_CLIENT_ID = "PASTE_CLIENT_ID";
