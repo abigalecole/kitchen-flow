@@ -352,7 +352,7 @@ function seed(){
 }
 
 /* ---------- state + saving ---------- */
-const APP_VERSION = "1.5.2";
+const APP_VERSION = "1.5.3";
 let state = null, saveTimer = null;
 const sync = { configured: false, user: null, fb: null, auth: null, db: null, docRef: null, unsub: null, base: null, household: null };
 let commitSeq = 0, flushing = false;
@@ -1194,7 +1194,7 @@ async function importLibrary(opts){
       }
     }
     await sync.fb.setDoc(libDoc("index"), {menus: Object.values(known), updated: Date.now()});
-    LIB.index = {menus: Object.values(known)};
+    LIB.index = {menus: Object.values(known)}; LIB.all = null;
     s.done = true;
     say(IMP.stop ? `Stopped. ${made} menus added so far; run it again to continue.` : `Done. ${made} menus added${skipped ? `, ${skipped} already in the library` : ""}. The library has ${Object.values(known).filter(m => !m.loose).length} menus.`);
   } catch (e) {
@@ -1284,13 +1284,44 @@ async function wipeLibrary(){
     let n = 0;
     for (const id of ids) { s.progress = `Deleting ${++n} of ${ids.length}…`; if (ui.sheet === s) renderSheet(); await sync.fb.deleteDoc(libDoc("m-" + id)); }
     await sync.fb.deleteDoc(libDoc("index"));
-    LIB.index = {menus: []}; LIB.menus = {};
+    LIB.index = {menus: []}; LIB.menus = {}; LIB.all = null;
     s.busy = false; ui.sheet = null; render(); toast(`Menu library deleted (${ids.length} menus)`);
   } catch (e) {
     s.busy = false; s.err = true;
     s.msg = e && e.code === "permission-denied" ? "Only the library's owner can delete it (your database rules don't allow this account)." : "Couldn't delete everything. Check your connection and try again; it picks up where it stopped.";
     if (ui.sheet === s) renderSheet();
   }
+}
+
+/* ---------- menu library: every recipe, for the Cook tab and meal picker ---------- */
+let libAllLoading = null;
+function libAll(){
+  if (LIB.all) return Promise.resolve(LIB.all);
+  if (!libReady()) return Promise.resolve(null);
+  if (libAllLoading) return libAllLoading;
+  libAllLoading = (async () => {
+    const idx = await libIndex();
+    await pool(idx.menus.filter(m => !LIB.menus[m.id]), 6, m => libMenu(m.id).catch(() => null));
+    const seen = new Set(), out = [];
+    for (const im of idx.menus) {
+      const m = LIB.menus[im.id]; if (!m) continue;
+      m.recipes.forEach((r, i) => { const k = r.name.toLowerCase(); if (seen.has(k)) return; seen.add(k); out.push({mid: m.id, i, r, menu: m.loose ? "" : m.name}); });
+    }
+    LIB.all = out; libAllLoading = null; return out;
+  })().catch(e => { libAllLoading = null; throw e; });
+  return libAllLoading;
+}
+function needLibAll(){
+  // load in the background, then redraw whatever is showing
+  libAll().then(() => { render(); }).catch(() => { LIB.allErr = "Couldn't load the library. Check your connection."; render(); });
+}
+const mineByName = name => state.recipes.find(x => x.name.toLowerCase() === String(name).toLowerCase());
+function libRows(q, cat){
+  return (LIB.all || []).filter(x => !mineByName(x.r.name) && (cat === "All" || !cat || x.r.cat === cat) && (!q || x.r.name.toLowerCase().includes(q) || x.menu.toLowerCase().includes(q) || (x.r.ingredients || []).some(i => i.name.toLowerCase().includes(q))));
+}
+function libSourceHtml(src, scope){
+  if (!libReady()) return src === "lib" ? `<div class="empty">${sync.configured ? "Sign in to see the menu library." : "The menu library needs sync turned on (setup guide, step 1)."}</div>` : "";
+  return "";
 }
 
 /* ---------- menu library: using it ---------- */
@@ -1742,6 +1773,20 @@ function recipeMatchesQuery(r, q){
 function agoText(d){ const n = ageDays(d); return n === 0 ? "today" : n === 1 ? "yesterday" : n < 14 ? `${n} days ago` : n < 60 ? `${Math.round(n / 7)} weeks ago` : `${Math.round(n / 30)} months ago`; }
 function cookListHtml(){
   const q = (ui.cookQ || "").trim().toLowerCase(), f = ui.cookFilter;
+  if (ui.cookSrc === "lib") {
+    if (!libReady()) return libSourceHtml("lib");
+    if (!LIB.all) { if (!libAllLoading && !LIB.allErr) needLibAll(); return `<div class="status">${esc(LIB.allErr || "Loading the menu library…")}</div>`; }
+    const soonIds = new Set(useSoon(3).map(p => p.id));
+    const rows = libRows(q).map(x => ({...x, m: recipeMatch(x.r), soon: (x.r.ingredients || []).filter(i => { const p = findPantry(i.name); return p && soonIds.has(p.id); }).map(i => i.name)}))
+      .filter(x => f === "all" || f === "fav" || f === "prepped" ? f === "all" : f === "ready" ? x.m.missing.length === 0 : f === "useup" ? x.soon.length > 0 : x.m.missing.length > 0 && x.m.missing.length <= 2)
+      .sort((a, b) => (f === "useup" ? b.soon.length - a.soon.length : 0) || a.m.missing.length - b.m.missing.length || a.r.name.localeCompare(b.r.name));
+    if (!rows.length) return `<div class="empty">${(LIB.all || []).length ? (f === "fav" || f === "prepped" ? "Favorites and prepped portions are for your own recipes. Switch to My recipes." : "No library recipes match.") : "The menu library is empty. Build it from Drive in Settings."}</div>`;
+    return rows.slice(0, 120).map(({mid, i, r, menu, m, soon}) => `<button class="rcard" data-act="lib-recipe" data-m="${esc(mid)}" data-i="${i}" data-from="cook">
+      <div class="cat">${esc(r.cat || "")}${menu ? ` <span class="sub" style="text-transform:none;letter-spacing:0;font-weight:400">· ${esc(menu)}</span>` : ""}</div><h3>${esc(r.name)}</h3>${soon.length ? `<div class="sub" style="color:var(--warn);font-weight:700">Uses up ${esc(soon.join(", "))}</div>` : ""}
+      <div class="sub"><span class="num">${m.have} of ${m.total}</span> ingredients in stock</div>
+      <div class="meter" aria-hidden="true"><i style="width:${m.total ? Math.round(m.have / m.total * 100) : 0}%"></i></div>
+      <div class="miss">${m.missing.length ? `Missing: <b>${esc(m.missing.slice(0, 6).map(i => i.name).join(", "))}${m.missing.length > 6 ? "…" : ""}</b>` : "You have everything."}</div></button>`).join("") + (rows.length > 120 ? `<p class="hint">Showing 120 of ${rows.length}. Search to narrow it down.</p>` : "");
+  }
   const soonIds = new Set(useSoon(3).map(p => p.id));
   const shown = state.recipes.filter(r => recipeMatchesQuery(r, q)).map(r => ({r, m: recipeMatch(r), soon: r.ingredients.filter(i => { const p = findPantry(i.name); return p && soonIds.has(p.id); }).map(i => i.name)}))
     .filter(x => f === "all" || (f === "ready" ? x.m.missing.length === 0 : f === "prepped" ? portionsFor(x.r.id) > 0 : f === "useup" ? x.soon.length > 0 : f === "fav" ? x.r.fav : x.m.missing.length > 0 && x.m.missing.length <= 2))
@@ -1755,12 +1800,12 @@ function cookListHtml(){
 }
 function renderCook(){
   const f = ui.cookFilter;
-  return `<div class="addrow"><button class="btn small ghost" data-act="lib-recipes">From library</button>${driveReady() ? `<button class="btn small ghost" data-act="drive-open">From Drive</button>` : ""}<button class="btn small ghost" data-act="paste-open">Add from link</button><button class="btn small ghost" data-act="new-r">+ New</button></div>
+  return `<div class="addrow"><button class="btn small ghost" data-act="lib-browse">Menus</button>${driveReady() ? `<button class="btn small ghost" data-act="drive-open">From Drive</button>` : ""}<button class="btn small ghost" data-act="paste-open">Add from link</button><button class="btn small ghost" data-act="new-r">+ New</button></div>
+  <div class="seg" role="group" aria-label="Show" style="margin-top:2px"><button data-act="cook-src" data-v="mine" aria-pressed="${ui.cookSrc !== "lib"}">My recipes (${state.recipes.length})</button><button data-act="cook-src" data-v="lib" aria-pressed="${ui.cookSrc === "lib"}">Library${LIB.all ? ` (${libRows("").length})` : ""}</button></div>
   <input id="cookQ" class="search" type="search" placeholder="Search recipes or ingredients" autocomplete="off" value="${esc(ui.cookQ || "")}" aria-label="Search recipes">
   <div class="filters" role="group" aria-label="Filter recipes">
     ${[["all","All recipes"],["ready","Ready now"],["almost","Missing 1–2"],["useup","Use it up"],["fav","Favorites"],["prepped","Prepped"]].map(([k,l]) => `<button data-act="filter" data-f="${k}" aria-pressed="${f===k}">${l}</button>`).join("")}
   </div>
-  <div class="section-h"><h2>Your recipes</h2><span class="num">${state.recipes.length}</span></div>
   <div id="cookList">${cookListHtml()}</div>`;
 }
 
@@ -1820,9 +1865,11 @@ function renderSheet(){
   }
   if (s.type === "pick") {
     const title = s.mode === "batch" ? "Batch cook" : `${new Date(s.k + "T12:00:00").toLocaleDateString(undefined,{weekday:"long"})} ${s.m}`;
-    const cats = ["All", ...CATS.filter(c => state.recipes.some(r => r.cat === c))];
+    const pool_ = s.src === "lib" ? (LIB.all || []).map(x => x.r) : state.recipes;
+    const cats = ["All", ...CATS.filter(c => pool_.some(r => r.cat === c))];
     body = `<h2>${esc(title)}</h2><div class="meta">${s.mode === "batch" ? "Pick a recipe to cook ahead and portion out." : "Add as many recipes as you like, such as a main and a side."}</div>
-      <input id="pickQ" class="search" type="search" placeholder="Search recipes or ingredients" autocomplete="off" value="${esc(s.q || "")}" aria-label="Search recipes">
+      ${libReady() ? `<div class="seg" role="group" aria-label="Show"><button data-act="pick-src" data-v="mine" aria-pressed="${s.src !== "lib"}">My recipes</button><button data-act="pick-src" data-v="lib" aria-pressed="${s.src === "lib"}">Library</button></div>` : ""}
+      <input id="pickQ" class="search" type="search" placeholder="${s.src === "lib" ? "Search the library: dish, ingredient or menu" : "Search recipes or ingredients"}" autocomplete="off" value="${esc(s.q || "")}" aria-label="Search recipes">
       ${cats.length > 2 ? `<div class="filters" role="group" aria-label="Recipe type" style="margin-bottom:10px">${cats.map(c => `<button data-act="pick-cat" data-c="${c}" aria-pressed="${(s.cat || "All") === c}">${c}</button>`).join("")}</div>` : ""}
       ${s.added && s.added.length ? `<div class="status">Added: ${esc(s.added.join(", "))}</div>` : ""}
       <div id="pickList">${pickListHtml(s)}</div>
@@ -1910,7 +1957,7 @@ function renderSheet(){
         <div class="actions two" style="margin-bottom:12px">${mine ? `<button class="btn ghost" data-act="open-r" data-id="${mine.id}">Open my copy</button>` : `<button class="btn" data-act="lib-add" data-m="${esc(m.id)}" data-i="${s.i}">Add to my recipes</button>`}<button class="btn ghost" data-act="lib-add-plan" data-m="${esc(m.id)}" data-i="${s.i}">Plan it</button></div>
         <ul class="ing">${(r.ingredients || []).map(i => `<li><div class="grow"><span class="num">${esc(qtyStr(i.qty, i.unit))}</span> ${esc(i.name)}</div></li>`).join("")}</ul>
         ${r.steps ? `<div class="steps">${esc(r.steps)}</div>` : ""}
-        <button class="btn plain" data-act="${s.from === "menu" ? "lib-back-menu" : "lib-back"}" style="width:100%">Back</button>`;
+        <button class="btn plain" data-act="${s.from === "menu" ? "lib-back-menu" : "lib-back"}" style="width:100%">${s.from === "cook" ? "Close" : "Back"}</button>`;
     }
   }
   if (s.type === "week") {
@@ -2099,6 +2146,14 @@ function startCook(id, o = {}){
 }
 function pickListHtml(s){
   const q = (s.q || "").trim().toLowerCase(), cat = s.cat || "All";
+  if (s.src === "lib") {
+    if (!libReady()) return libSourceHtml("lib");
+    if (!LIB.all) { if (!libAllLoading && !LIB.allErr) libAll().then(() => { if (ui.sheet === s) renderSheet(); }).catch(() => { LIB.allErr = "Couldn't load the library."; if (ui.sheet === s) renderSheet(); }); return `<div class="status">${esc(LIB.allErr || "Loading the menu library…")}</div>`; }
+    const rows = libRows(q, cat).map(x => ({...x, m: recipeMatch(x.r)})).sort((a, b) => a.m.missing.length - b.m.missing.length || a.r.name.localeCompare(b.r.name));
+    if (!rows.length) return `<div class="empty">No library recipes match${(LIB.all || []).length ? "" : ". The library is empty"}.</div>`;
+    return rows.slice(0, 100).map(({mid, i, r, menu, m}) => `<button class="rcard" data-act="${s.mode === "batch" ? "batch-lib" : "assign-lib"}" data-m="${esc(mid)}" data-i="${i}"><div class="cat">${esc(r.cat || "")}${menu ? ` <span class="sub" style="text-transform:none;letter-spacing:0;font-weight:400">· ${esc(menu)}</span>` : ""}</div><h3>${esc(r.name)}</h3>
+      <div class="miss">${m.missing.length ? `Missing: <b>${esc(m.missing.slice(0, 5).map(x => x.name).join(", "))}${m.missing.length > 5 ? "…" : ""}</b>` : "You have everything."}</div></button>`).join("") + (rows.length > 100 ? `<p class="hint">Showing 100 of ${rows.length}. Search to narrow it down.</p>` : "");
+  }
   const list = state.recipes.filter(r => (cat === "All" || r.cat === cat) && recipeMatchesQuery(r, q))
     .map(r => ({r, m: recipeMatch(r), por: portionsFor(r.id)}))
     .sort((a,b) => (b.por > 0) - (a.por > 0) || a.m.missing.length - b.m.missing.length || a.r.name.localeCompare(b.r.name));
@@ -2301,9 +2356,9 @@ document.addEventListener("click", e => {
       const sh = {type: "libMenu", id, prev}; openSheet(sh);
       if (!LIB.menus[id]) libMenu(id).then(m => { if (!m) sh.msg = "This menu isn't in the library anymore."; if (ui.sheet === sh) renderSheet(); }).catch(() => { sh.msg = "Couldn't load this menu. Check your connection."; if (ui.sheet === sh) renderSheet(); });
       break; }
-    case "lib-back": openSheet(s.prev && s.prev.type === "lib" ? s.prev : (s.prev && s.prev.prev) || {type: "lib", mode: "menus", q: ""}); break;
+    case "lib-back": if (s.from === "cook") { closeSheet(); break; } openSheet(s.prev && s.prev.type === "lib" ? s.prev : (s.prev && s.prev.prev) || {type: "lib", mode: "menus", q: ""}); break;
     case "lib-recipe": {
-      const mid = el.dataset.m, i = +el.dataset.i, sh = {type: "libRecipe", mid, i, from: s.type === "libMenu" ? "menu" : "list", prev: s.type === "libMenu" ? s.prev : s}; openSheet(sh);
+      const mid = el.dataset.m, i = +el.dataset.i, sh = {type: "libRecipe", mid, i, from: el.dataset.from === "cook" ? "cook" : s && s.type === "libMenu" ? "menu" : "list", prev: s && s.type === "libMenu" ? s.prev : s}; openSheet(sh);
       if (!LIB.menus[mid]) libMenu(mid).then(() => { if (ui.sheet === sh) renderSheet(); }).catch(() => { sh.msg = "Couldn't load this recipe."; if (ui.sheet === sh) renderSheet(); });
       break; }
     case "lib-add": { const r = copyLibRecipe(LIB.menus[el.dataset.m], +el.dataset.i); commit(`${r.name} added to your recipes`); break; }
@@ -2390,6 +2445,13 @@ document.addEventListener("click", e => {
       for (const k of Object.keys(state.plan)) { for (const m of Object.keys(state.plan[k])) { state.plan[k][m] = state.plan[k][m].filter(x => x.r !== id); if (!state.plan[k][m].length) delete state.plan[k][m]; } if (!Object.keys(state.plan[k]).length) delete state.plan[k]; }
       undoSnap = snap; ui.sheet = null; commit(); toast("Recipe deleted", true); break; }
     case "filter": ui.cookFilter = el.dataset.f; render(); break;
+    case "cook-src": ui.cookSrc = el.dataset.v; LIB.allErr = ""; render(); break;
+    case "pick-src": s.src = el.dataset.v; s.cat = "All"; LIB.allErr = ""; renderSheet(); break;
+    case "assign-lib": case "batch-lib": {
+      const m = LIB.menus[el.dataset.m]; if (!m) break;
+      const r = copyLibRecipe(m, +el.dataset.i);
+      if (a === "batch-lib") { commit(); startCook(r.id, {batch: true}); break; }
+      addToPlan(s.k, s.m, r.id); s.added.push(r.name); commit(); break; }
     case "paste-open": openSheet({type:"paste"}); break;
     case "settings": openSheet({type:"settings"}); break;
     case "sign-out": doSignOut(); break;
