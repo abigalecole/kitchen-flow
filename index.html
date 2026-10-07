@@ -352,7 +352,7 @@ function seed(){
 }
 
 /* ---------- state + saving ---------- */
-const APP_VERSION = "1.5.3";
+const APP_VERSION = "1.5.5";
 let state = null, saveTimer = null;
 const sync = { configured: false, user: null, fb: null, auth: null, db: null, docRef: null, unsub: null, base: null, household: null };
 let commitSeq = 0, flushing = false;
@@ -548,6 +548,7 @@ function cleanNutr(x){
 function titleCase(t){ return t === t.toUpperCase() ? t.toLowerCase().replace(/(^|[\s(\/-])(\p{L})/gu, (m, a, c) => a + c.toUpperCase()).replace(/\b(With|And|Or|Of|The|A|In|On|For|To|En)\b(?!$)/g, w => w.toLowerCase()).replace(/^./, c => c.toUpperCase()) : t; }
 function cleanIngredient(l){
   l = l.replace(/^(high[- ]smoke[- ]point|good[- ]quality|extra[- ]virgin),\s*/i, "");
+  l = l.replace(/^(an?|one)\s+(?=[\d½¼¾⅓⅔])/i, "");
   return l.replace(/\\/g, "").replace(/^[-•*▢☐□]\s*/, "").replace(/\([^)]*\)/g, " ")
     .replace(/\b(large|medium|small)\s+or\s+[\d½¼¾⅓⅔]+\s+(large|medium|small)\s+/i, "").replace(/,.*$/, "").replace(/\bplus more.*$/i, "").replace(/\s+/g, " ").trim();
 }
@@ -734,7 +735,15 @@ async function pdfText(buf){
   for (let i = 1; i <= doc.numPages; i++) {
     const page = await doc.getPage(i);
     const tc = await page.getTextContent();
-    for (const it of tc.items) { out += it.str; if (it.hasEOL) out += "\n"; }
+    let lastY = null, lastEnd = null;
+    for (const it of tc.items) {
+      const x = it.transform ? it.transform[4] : null, y = it.transform ? it.transform[5] : null, h = Math.abs(it.transform ? it.transform[3] : 10) || 10;
+      if (it.str && lastY != null && y != null && Math.abs(y - lastY) > h * 0.6 && !out.endsWith("\n")) out += "\n";
+      else if (lastEnd != null && x != null && x - lastEnd > h * 0.15 && it.str && !/\s$/.test(out) && !/^\s/.test(it.str)) out += " ";
+      out += it.str;
+      if (it.hasEOL) out += "\n";
+      if (it.str) { lastY = y; lastEnd = x != null ? x + (it.width || 0) : null; }
+    }
     out += "\n";
   }
   return out;
@@ -1447,8 +1456,9 @@ function addToGrocery(items){
 }
 const todayK = () => ymd(new Date());
 const daysUntil = d => Math.round((new Date(d + "T12:00:00") - new Date(todayK() + "T12:00:00")) / 864e5);
+const FREEZER_DAYS = 90; // about 3 months
 function shelfDays(name, loc){
-  if (isFreezer(loc)) return null;
+  if (isFreezer(loc)) return FREEZER_DAYS;
   const n = name.toLowerCase(), a = aisleFor(name);
   if (COUNTER.some(k => n.includes(k))) return null;
   if (a === "Meat & fish") return 2;
@@ -1552,9 +1562,30 @@ function renderList(){
 }
 
 function ageDays(d){ return Math.max(0, Math.round((new Date(ymd(new Date()) + "T12:00:00") - new Date(d + "T12:00:00")) / 864e5)); }
+// Moving food in or out of the freezer resets its use-by date.
+function relocate(p, newLoc, isPortion){
+  const wasFrozen = isFreezer(p.loc); p.loc = newLoc;
+  const nowFrozen = isFreezer(newLoc);
+  if (isPortion) {
+    if (nowFrozen && !wasFrozen) { p.frozen = todayK(); delete p.thawed; }
+    else if (!nowFrozen && wasFrozen) { delete p.frozen; p.thawed = todayK(); }
+    return;
+  }
+  if (nowFrozen && !wasFrozen) p.use = ymd(addDays(new Date(), FREEZER_DAYS));
+  else if (!nowFrozen && wasFrozen) { const sd = shelfDays(p.name, newLoc); p.use = sd ? ymd(addDays(new Date(), sd)) : null; }
+}
+function portionSoon(p){
+  if (isFreezer(p.loc)) return ageDays(p.frozen || p.made) >= FREEZER_DAYS - 7;
+  return p.thawed ? ageDays(p.thawed) >= 2 : ageDays(p.made) >= 4;
+}
 function ageChip(p){
   const days = ageDays(p.made);
-  if (!isFreezer(p.loc) && days >= 4) return `<span class="chip warn">Use soon · made ${days} days ago</span>`;
+  if (isFreezer(p.loc)) {
+    const start = p.frozen || p.made, left = FREEZER_DAYS - ageDays(start), until = new Date(addDays(new Date(start + "T12:00:00"), FREEZER_DAYS)).toLocaleDateString(undefined, {month: "short", day: "numeric"});
+    return left <= 7 ? `<span class="chip ${left < 0 ? "out" : "warn"}">${left < 0 ? "Past 3 months frozen" : `Use soon · frozen until ${until}`}</span>` : `<span class="chip loc">Frozen · good until ${until}</span>`;
+  }
+  if (p.thawed) { const t = ageDays(p.thawed); return `<span class="chip ${t >= 2 ? "warn" : "loc"}">${t >= 2 ? "Use soon · " : ""}Thawed ${t === 0 ? "today" : t === 1 ? "yesterday" : `${t} days ago`}</span>`; }
+  if (days >= 4) return `<span class="chip warn">Use soon · made ${days} days ago</span>`;
   return `<span class="chip loc">${days === 0 ? "Made today" : days === 1 ? "Made yesterday" : `Made ${days} days ago`}</span>`;
 }
 function renderPrepped(){
@@ -1649,7 +1680,7 @@ function renderPrepCard(){
   const ready = state.prepped.filter(p => p.portions > 0);
   const done = tasks.filter(t => t.done).length;
   let h = `<div class="prep"><div class="prep-h"><h2>Meal prep</h2>${tasks.length ? `<span class="sub num">${done} of ${tasks.length} done</span>` : ""}</div>`;
-  if (ready.length) h += `<div class="readyrow">${ready.map(p => `<span class="chip ${!isFreezer(p.loc) && ageDays(p.made) >= 4 ? "warn" : "ok"}">${esc(p.name)} · ${p.portions}</span>`).join("")}</div>`;
+  if (ready.length) h += `<div class="readyrow">${ready.map(p => `<span class="chip ${portionSoon(p) ? "warn" : "ok"}">${esc(p.name)} · ${p.portions}</span>`).join("")}</div>`;
   if (tasks.length) h += `<ul class="tasks">` + tasks.map(t => `<li class="${t.done ? "done" : ""}">
       <button class="check ${t.done ? "on" : ""}" data-act="task-toggle" data-id="${t.id}" aria-label="${t.done ? "Mark not done" : "Mark done"}: ${esc(t.text)}">${I.tick}</button>
       <div class="grow"><div class="name">${esc(t.text)}</div>${t.for ? `<div class="sub">${esc(t.for)}</div>` : ""}${(t.recipes || []).length && !t.done ? `<div class="readyrow" style="margin:6px 0 0">${t.recipes.filter(x => recipeById(x.id)).map(x => `<button class="chip loc" data-act="open-r" data-id="${x.id}" style="font-size:13px;padding:5px 10px">${esc(x.name)} ›</button>`).join("")}${t.recipes.length === 1 && recipeById(t.recipes[0].id) ? `<button class="btn small" data-act="task-make" data-id="${t.id}">Make it</button>` : ""}</div>` : ""}${t.detail && t.detail.length && !t.done ? `<details class="more"><summary>${t.detail.length} step${t.detail.length === 1 ? "" : "s"}</summary><ul class="detail">${t.detail.map(d => `<li>${esc(d)}</li>`).join("")}</ul></details>` : ""}
@@ -1868,7 +1899,7 @@ function renderSheet(){
     const pool_ = s.src === "lib" ? (LIB.all || []).map(x => x.r) : state.recipes;
     const cats = ["All", ...CATS.filter(c => pool_.some(r => r.cat === c))];
     body = `<h2>${esc(title)}</h2><div class="meta">${s.mode === "batch" ? "Pick a recipe to cook ahead and portion out." : "Add as many recipes as you like, such as a main and a side."}</div>
-      ${libReady() ? `<div class="seg" role="group" aria-label="Show"><button data-act="pick-src" data-v="mine" aria-pressed="${s.src !== "lib"}">My recipes</button><button data-act="pick-src" data-v="lib" aria-pressed="${s.src === "lib"}">Library</button></div>` : ""}
+      ${sync.configured ? `<div class="seg" role="group" aria-label="Show"><button data-act="pick-src" data-v="mine" aria-pressed="${s.src !== "lib"}">My recipes</button><button data-act="pick-src" data-v="lib" aria-pressed="${s.src === "lib"}">Library</button></div>` : ""}
       <input id="pickQ" class="search" type="search" placeholder="${s.src === "lib" ? "Search the library: dish, ingredient or menu" : "Search recipes or ingredients"}" autocomplete="off" value="${esc(s.q || "")}" aria-label="Search recipes">
       ${cats.length > 2 ? `<div class="filters" role="group" aria-label="Recipe type" style="margin-bottom:10px">${cats.map(c => `<button data-act="pick-cat" data-c="${c}" aria-pressed="${(s.cat || "All") === c}">${c}</button>`).join("")}</div>` : ""}
       ${s.added && s.added.length ? `<div class="status">Added: ${esc(s.added.join(", "))}</div>` : ""}
@@ -2003,7 +2034,7 @@ function renderSheet(){
       <div class="two-col"><label class="field">Amount<input id="iQty" type="number" inputmode="decimal" min="0" step="any" value="${p.qty}"></label><label class="field">Unit<input id="iUnit" value="${esc(p.unit || "")}" placeholder="lb, cup, can…"></label></div>
       <label class="field">Kept in<select id="iLoc">${state.locs.map(l => `<option value="${l.id}" ${l.id === p.loc ? "selected" : ""}>${esc(l.name)}</option>`).join("")}</select></label>
       <label class="field">Use by<input id="iUse" type="date" value="${esc(p.use || "")}"></label>
-      <div class="presets">${preset(1,"Tomorrow")}${preset(3,"3 days")}${preset(7,"1 week")}${preset(14,"2 weeks")}${preset(30,"1 month")}${preset(0,"No date")}</div>
+      <div class="presets">${preset(1,"Tomorrow")}${preset(3,"3 days")}${preset(7,"1 week")}${preset(14,"2 weeks")}${preset(30,"1 month")}${preset(90,"3 months")}${preset(0,"No date")}</div>
       <label class="toggle"><input type="checkbox" id="iStaple" ${p.min ? "checked" : ""}> Staple: always keep this stocked</label>
       <label class="field">Keep at least (${esc(p.unit || "count")})<input id="iMin" type="number" inputmode="decimal" min="0" step="any" value="${p.min || ""}" placeholder="e.g. 2"></label>
       <p class="hint" style="margin-top:-6px">When stock drops below this, it's added to your grocery list automatically.</p>
@@ -2227,7 +2258,9 @@ document.addEventListener("submit", e => {
   if (f === "item") {
     const p = state.pantry.find(x => x.id === ui.sheet.id); if (!p) return;
     p.name = $("#iName").value.trim() || p.name; p.qty = Math.max(0, +$("#iQty").value || 0); p.unit = UNIT_ALIASES[$("#iUnit").value.trim().toLowerCase()] || $("#iUnit").value.trim();
-    p.loc = $("#iLoc").value; p.use = $("#iUse").value || null;
+    const newUse = $("#iUse").value || null, oldUse = p.use || null, newLoc = $("#iLoc").value;
+    if (newLoc !== p.loc && newUse === oldUse) relocate(p, newLoc); // date untouched: reset it for the new spot
+    else { p.loc = newLoc; p.use = newUse; }
     const min = +$("#iMin").value || 0; p.min = $("#iStaple").checked ? (min || 1) : 0; if (!p.min) { delete p.min; delete p.listed; }
     ui.sheet = null; commit("Saved"); return;
   }
@@ -2298,7 +2331,7 @@ document.addEventListener("click", e => {
       p.qty = Math.max(0, Math.round((p.qty + (a==="inc"?st:-st))*100)/100); commit(); break; }
     case "loc": case "ploc": {
       const p = (a === "loc" ? state.pantry : state.prepped).find(x => x.id === id); if (!p) break;
-      const i = state.locs.findIndex(l => l.id === p.loc); p.loc = state.locs[(i + 1) % state.locs.length].id; commit(); break; }
+      const i = state.locs.findIndex(l => l.id === p.loc); relocate(p, state.locs[(i + 1) % state.locs.length].id, a === "ploc"); commit(); break; }
     case "pinc": case "pdec": {
       const p = state.prepped.find(x => x.id === id); if (!p) break;
       p.portions = Math.max(0, p.portions + (a === "pinc" ? 1 : -1));
@@ -2427,7 +2460,7 @@ document.addEventListener("click", e => {
       const slot = s.sid ? findSlot(s.k, s.m, s.sid) : null; if (slot) slot.done = true;
       if (s.taskId) { const t = Object.values(state.prep).flat().find(x => x.id === s.taskId); if (t) t.done = true; }
       const r = recipeById(s.id);
-      if (s.portions > 0) state.prepped.push({id: uid(), r: r.id, name: r.name, portions: s.portions, loc: s.ploc || fridgeId(), made: ymd(new Date())});
+      if (s.portions > 0) { const loc = s.ploc || fridgeId(); state.prepped.push({id: uid(), r: r.id, name: r.name, portions: s.portions, loc, made: ymd(new Date()), ...(isFreezer(loc) ? {frozen: ymd(new Date())} : {})}); }
       r.lastMade = todayK();
       undoSnap = snap; ui.sheet = null;
       const msg = `Pantry updated · ${used.length} item${used.length===1?"":"s"} used` + (s.portions > 0 ? ` · ${s.portions} portions saved` : "") + (s.relist && gone.length ? ` · ${gone.length} added to list` : "");
