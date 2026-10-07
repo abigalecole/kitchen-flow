@@ -204,6 +204,9 @@ label.field textarea{min-height:120px;resize:vertical}
 .seg button{border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:9px;font-weight:700}
 .seg button[aria-pressed="true"]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
 .loglist{font-size:13px;color:var(--muted);max-height:160px;overflow:auto;margin:6px 0 10px;padding-left:18px}
+.storeh{font-family:var(--display);font-size:22px;margin:22px 0 2px;display:flex;justify-content:space-between;align-items:baseline;border-bottom:2px solid var(--ink);padding-bottom:4px}
+.storeh.unsorted{border-bottom-color:var(--warn);color:var(--warn)}
+.storeh .num{font-size:14px;color:var(--muted);font-family:var(--body)}
 .gear{border:0;background:transparent;color:var(--muted);width:36px;height:36px;border-radius:10px;display:grid;place-items:center;padding:0}
 .top-right{display:flex;align-items:center;gap:6px}
 #auth{position:fixed;inset:0;z-index:40;background:var(--bg);overflow:auto;padding:calc(40px + env(safe-area-inset-top,0px)) 20px 40px}
@@ -295,6 +298,35 @@ function aisleFor(name){
   return "Other";
 }
 const COUNTER = ["onion","garlic","potato","banana","tomato","avocado","apple","bread","tortilla","lime","lemon"];
+const DEFAULT_SECTIONS = [{id: "produce", name: "Produce"}, {id: "meat", name: "Meat & fish"}, {id: "dairy", name: "Dairy & eggs"}, {id: "frozen", name: "Frozen"}, {id: "bakery", name: "Bakery"}, {id: "pantry", name: "Pantry"}, {id: "other", name: "Other"}];
+const AISLE_TO_SEC = {"Produce": "produce", "Meat & fish": "meat", "Dairy & eggs": "dairy", "Frozen": "frozen", "Bakery": "bakery", "Pantry": "pantry", "Other": "other"};
+const secName = id => ((state.sections || []).find(x => x.id === id) || {name: "Other"}).name;
+const storeName = id => ((state.stores || []).find(x => x.id === id) || {name: "Any store"}).name;
+function secFor(name){
+  const secs = state.sections || DEFAULT_SECTIONS, pref = (state.itemPrefs || {})[norm(name)];
+  if (pref && pref.sec && secs.some(x => x.id === pref.sec)) return pref.sec;
+  const want = AISLE_TO_SEC[aisleFor(name)] || "other";
+  return (secs.find(x => x.id === want) || secs.find(x => x.id === "other") || secs[secs.length - 1] || {id: "other"}).id;
+}
+// When planning adds to the list: one store this week -> that store; several -> the item's usual store if it's one of them, else unsorted.
+let SHOP_STORES = null;
+const shopStores = () => (state.shopStores || []).filter(id => (state.stores || []).some(x => x.id === id));
+function storeForPlanned(name){
+  const sel = SHOP_STORES || shopStores();
+  if (!sel.length) return "";
+  if (sel.length === 1) return sel[0];
+  const pref = storeFor(name); return sel.includes(pref) ? pref : "";
+}
+function withStores(stores, fn){ SHOP_STORES = stores; try { return fn(); } finally { SHOP_STORES = null; } }
+function askStores(wk, then){
+  // ask "Where are you shopping this week?" before planning adds to the list
+  const prev = shopStores();
+  openSheet({type: "shopWhere", wk, sel: prev.length ? [...prev] : (state.stores.length === 1 ? [state.stores[0].id] : []), then});
+}
+function storeFor(name){
+  const pref = (state.itemPrefs || {})[norm(name)];
+  return pref && pref.store && (state.stores || []).some(x => x.id === pref.store) ? pref.store : "";
+}
 const DEFAULT_LOCS = [{id:"fridge", name:"Fridge"}, {id:"freezer", name:"Freezer"}, {id:"pantry", name:"Pantry"}];
 function locFor(name){
   const n = name.toLowerCase(), a = aisleFor(name);
@@ -338,7 +370,7 @@ function seed(){
   const pantry = ["2 lb chicken breast","1 head broccoli","10 clove garlic","8 cup rice","1 bottle olive oil","10 eggs","1 box spaghetti","1 jar marinara","2 can black beans","8 tortillas","8 oz cheddar","3 onion","2 bell pepper","1 lb ground beef","1 can diced tomatoes","1 jar cumin"]
     .map(l => { const p = parseLine(l); return {id: uid(), ...p, loc: locFor(p.name)}; });
   const grocery = ["2 lime","4 oz parmesan","4 stick butter","1 bottle soy sauce","1 jar chili powder","6 banana","1 bag coffee"]
-    .map(l => { const p = parseLine(l); return {id: uid(), ...p, aisle: aisleFor(p.name)}; });
+    .map(l => { const p = parseLine(l); return {id: uid(), ...p, sec: AISLE_TO_SEC[aisleFor(p.name)] || "other", store: ""}; });
   const mon = mondayOf(new Date()), byName = n => recipes.find(r => r.name.startsWith(n)).id;
   const it = n => [{id: uid(), r: byName(n), done: false}];
   const plan = {};
@@ -352,7 +384,7 @@ function seed(){
 }
 
 /* ---------- state + saving ---------- */
-const APP_VERSION = "1.5.5";
+const APP_VERSION = "1.6";
 let state = null, saveTimer = null;
 const sync = { configured: false, user: null, fb: null, auth: null, db: null, docRef: null, unsub: null, base: null, household: null };
 let commitSeq = 0, flushing = false;
@@ -374,6 +406,12 @@ function normalize(st){
     }
     if (!Object.keys(day).length) delete st.plan[k];
   }
+  if (!Array.isArray(st.sections) || !st.sections.length) st.sections = clone(DEFAULT_SECTIONS);
+  st.stores ||= []; st.itemPrefs ||= {};
+  st.grocery.forEach(g => {
+    if (!g.sec || !st.sections.some(x => x.id === g.sec)) { const want = AISLE_TO_SEC[g.aisle] || AISLE_TO_SEC[aisleFor(g.name)] || "other"; g.sec = (st.sections.find(x => x.id === want) || st.sections[st.sections.length - 1]).id; }
+    if (g.store && !st.stores.some(x => x.id === g.store)) g.store = "";
+  });
   st.recipes.forEach(r => { r.ingredients ||= []; if (!r.cat) r.cat = guessCat(r.name); if (r.prep == null) r.prep = ""; });
   st.v = 2;
   return st;
@@ -1450,7 +1488,7 @@ function addToGrocery(items){
   for (const it of items) {
     const ex = state.grocery.find(g => norm(g.name) === norm(it.name));
     if (ex) { const q = convert(it.qty, it.unit, ex.unit, it.name); if (q != null) ex.qty = Math.round((ex.qty + q) * 100) / 100; }
-    else { state.grocery.push({id: uid(), name: it.name, qty: it.qty, unit: it.unit, aisle: aisleFor(it.name), ...(it.auto ? {auto: true} : {})}); added++; }
+    else { state.grocery.push({id: uid(), name: it.name, qty: it.qty, unit: it.unit, sec: it.sec || secFor(it.name), store: it.store ?? storeForPlanned(it.name), ...(it.note ? {note: it.note} : {}), ...(it.auto ? {auto: true} : {})}); added++; }
   }
   return added;
 }
@@ -1548,17 +1586,34 @@ function renderList(){
   let h = `<form class="addbar" data-form="grocery"><input id="gAdd" list="knownItems" placeholder="Add item, e.g. 2 lb apples" autocomplete="off" enterkeyhint="done" aria-label="Add grocery item"><button class="btn" type="submit">Add</button></form>
   <datalist id="knownItems">${known.map(n => `<option value="${esc(n)}"></option>`).join("")}</datalist>
   ${again.length ? `<div class="section-h" style="margin-top:4px"><h2>Buy again</h2></div><div class="readyrow" style="margin-bottom:10px">${again.map(h => `<button class="chip loc" data-act="again" data-k="${esc(h.key)}" style="font-size:13px;padding:6px 11px">+ ${esc(h.name)}</button>`).join("")}</div>` : ""}`;
-  if (!state.grocery.length) return h + `<div class="empty">Your list is empty.<br>Add items above, or tap <b>Shop for this week</b> on the Plan tab to fill it from your meals.</div>`;
-  const groups = {};
-  for (const g of state.grocery) (groups[g.aisle || aisleFor(g.name)] ||= []).push(g);
-  const order = [...AISLES.map(a => a[0]), "Other"];
-  for (const a of order) { if (!groups[a]) continue;
-    h += `<div class="section-h"><h2>${esc(a)}</h2><span class="num">${groups[a].length}</span></div><ul class="rows">` +
-      groups[a].map(g => `<li data-id="${g.id}"><button class="check" data-act="buy" data-id="${g.id}" aria-label="Got ${esc(g.name)}">${I.tick}</button>
-      <div class="grow"><div class="name">${esc(g.name)}</div><div class="sub num">${esc(qtyStr(g.qty,g.unit))}${g.auto ? ` · <span style="color:var(--accent);font-weight:700">staple</span>` : ""}</div></div>
-      <button class="x" data-act="del-g" data-id="${g.id}" aria-label="Remove ${esc(g.name)}">×</button></li>`).join("") + `</ul>`;
+  const shopNow = shopStores();
+  if ((state.stores || []).length) h += `<p class="hint" style="margin:0 0 8px">${shopNow.length ? `Shopping at <b>${shopNow.map(id => esc(storeName(id))).join(", ")}</b>. ` : "No stores picked for this shop, so new items aren't sorted. "}<button class="linkname" data-act="pick-shop" style="color:var(--accent);font-weight:700">${shopNow.length ? "Change" : "Pick stores"}</button></p>`;
+  if (!state.grocery.length) return h + `<div class="empty">Your list is empty.<br>Add items above, or tap <b>Shop for this week</b> on the Plan tab to fill it from your meals.</div><div class="addrow" style="margin-top:12px"><button class="btn small ghost" data-act="sections">Sections &amp; stores</button></div>`;
+  const stores = state.stores || [], f = ui.listStore || "all";
+  if (stores.length) h += `<div class="filters" role="group" aria-label="Shopping at" style="margin-bottom:6px">${[["all", "All stores"], ...stores.map(x => [x.id, x.name])].map(([id, n]) => {
+    const c = id === "all" ? state.grocery.length : state.grocery.filter(g => g.store === id).length;
+    return `<button data-act="list-store" data-v="${esc(id)}" aria-pressed="${f === id}">${esc(n)} <span class="num" style="opacity:.7">${c}</span></button>`; }).join("")}</div>`;
+  const wkStores = shopStores();
+  const sortChoices = (wkStores.length ? wkStores : stores.map(x => x.id));
+  const row = g => `<li data-id="${g.id}"><button class="check" data-act="buy" data-id="${g.id}" aria-label="Got ${esc(g.name)}">${I.tick}</button>
+      <div class="grow"><button class="linkname" data-act="gitem" data-id="${g.id}"><span class="name">${esc(g.name)}</span></button><div class="sub num">${esc(qtyStr(g.qty,g.unit))}${g.note ? ` · ${esc(g.note)}` : ""}${g.auto ? ` · <span style="color:var(--accent);font-weight:700">staple</span>` : ""}</div>
+      ${stores.length && !g.store ? `<div class="readyrow" style="margin:6px 0 0">${sortChoices.map(id => `<button class="chip loc" data-act="g-store" data-id="${g.id}" data-v="${esc(id)}" style="font-size:13px;padding:6px 11px">${esc(storeName(id))}</button>`).join("")}</div>` : ""}</div>
+      <button class="x" data-act="del-g" data-id="${g.id}" aria-label="Remove ${esc(g.name)}">×</button></li>`;
+  const sectionsHtml = items => state.sections.map(sec => {
+    const list = items.filter(g => g.sec === sec.id); if (!list.length) return "";
+    return `<div class="section-h"><h2>${esc(sec.name)}</h2><span class="num">${list.length}</span></div><ul class="rows">${list.map(row).join("")}</ul>`;
+  }).join("");
+  const groupsList = stores.length ? [{id: "", name: "Not sorted yet"}, ...stores.map(x => ({id: x.id, name: x.name}))] : [{id: "", name: ""}];
+  const show = f === "all" ? groupsList : groupsList.filter(gr => gr.id === f || (gr.id === "" && f !== "all"));
+  for (const gr of show) {
+    const items = state.grocery.filter(g => stores.length ? (g.store || "") === gr.id : true);
+    if (!items.length) continue;
+    if (gr.name) h += `<h2 class="storeh${gr.id === "" ? " unsorted" : ""}">${esc(gr.name)}<span class="num">${items.length}</span></h2>${gr.id === "" ? `<p class="hint" style="margin:4px 0 0">Tap a store under each item to sort it. It goes there automatically next time.</p>` : ""}`;
+    h += sectionsHtml(items);
   }
-  return h + `<p class="hint">Checking an item off moves it to your pantry.</p><div class="actions" style="margin-top:4px"><button class="btn plain" data-act="clear-list" style="color:var(--out)">Clear the whole list</button></div>`;
+  if (f !== "all" && !state.grocery.some(g => g.store === f)) h += `<div class="empty">Nothing on your list for ${esc(storeName(f))} yet. Tap an item's name to choose its store.</div>`;
+  h += `<div class="addrow" style="margin-top:12px"><button class="btn small ghost" data-act="sections">Sections &amp; stores</button></div>`;
+  return h + `<p class="hint">Tap an item's name to change it or move it to another section or store. Checking it off moves it to your pantry.</p><div class="actions" style="margin-top:4px"><button class="btn plain" data-act="clear-list" style="color:var(--out)">Clear the whole list</button></div>`;
 }
 
 function ageDays(d){ return Math.max(0, Math.round((new Date(ymd(new Date()) + "T12:00:00") - new Date(d + "T12:00:00")) / 864e5)); }
@@ -2041,6 +2096,45 @@ function renderSheet(){
       <div class="actions"><button class="btn" type="submit">Save</button>
       <div class="actions two"><button type="button" class="btn plain" data-act="close">Cancel</button><button type="button" class="btn plain" data-act="item-del" style="color:var(--out)">${s.confirmDel ? "Tap again to remove" : "Remove item"}</button></div></div></form>`;
   }
+  if (s.type === "shopWhere") {
+    const n = s.sel.length;
+    body = `<h2>Where are you shopping this week?</h2><div class="meta">${n === 1 ? "Everything goes on your list under " + esc(storeName(s.sel[0])) + "." : n > 1 ? "Items you usually buy at one of these stores go there. The rest wait in <b>Not sorted yet</b> so you can pick a store for each." : "Pick one or more stores, or skip to add everything without a store."}</div>
+      ${state.stores.length ? `<ul class="ing">${state.stores.map(x => `<li><label class="toggle" style="padding:0;width:100%"><input type="checkbox" data-act="shop-where-sel" data-v="${esc(x.id)}" ${s.sel.includes(x.id) ? "checked" : ""}> ${esc(x.name)}</label></li>`).join("")}</ul>` : ""}
+      <form class="addbar" data-form="newstore" style="margin-top:8px"><input id="nsName" placeholder="Add a store, e.g. Costco" maxlength="30" aria-label="New store name"><button class="btn ghost" type="submit">Add</button></form>
+      <div class="actions"><button class="btn" data-act="shop-where-go" ${n ? "" : "disabled"}>${n === 1 ? `Shop at ${esc(storeName(s.sel[0]))}` : n > 1 ? `Shop at ${n} stores` : "Pick a store"}</button>
+      <button class="btn plain" data-act="shop-where-skip">Skip, don't sort by store</button></div>`;
+  }
+  if (s.type === "gitem") {
+    const g = state.grocery.find(x => x.id === s.id); if (!g) { ui.sheet = null; root.innerHTML = ""; return; }
+    body = `<h2>Edit item</h2>
+      <form data-form="gitem">
+      <label class="field">Name<input id="giName" value="${esc(g.name)}"></label>
+      <div class="two-col"><label class="field">Amount<input id="giQty" type="number" inputmode="decimal" min="0" step="any" value="${g.qty}"></label><label class="field">Unit<input id="giUnit" value="${esc(g.unit || "")}" placeholder="lb, cup, bag…"></label></div>
+      <label class="field">Section<select id="giSec">${state.sections.map(x => `<option value="${x.id}" ${x.id === g.sec ? "selected" : ""}>${esc(x.name)}</option>`).join("")}<option value="__new">+ New section…</option></select></label>
+      <label class="field" id="giSecNewWrap" hidden>New section name<input id="giSecNew" placeholder="e.g. Snacks" maxlength="30"></label>
+      <label class="field">Store<select id="giStore"><option value="">Any store</option>${state.stores.map(x => `<option value="${x.id}" ${x.id === g.store ? "selected" : ""}>${esc(x.name)}</option>`).join("")}<option value="__new">+ New store…</option></select></label>
+      <label class="field" id="giStoreNewWrap" hidden>New store name<input id="giStoreNew" placeholder="e.g. Costco" maxlength="30"></label>
+      <label class="field">Note<input id="giNote" value="${esc(g.note || "")}" placeholder="Brand, size, a coupon…"></label>
+      <label class="toggle"><input type="checkbox" id="giRemember" checked> Remember this for ${esc(g.name)}</label>
+      <p class="hint" style="margin:-6px 0 10px 30px">The section is used every time. The store is only used when you're shopping there.</p>
+      <div class="actions"><button class="btn" type="submit">Save</button>
+      <div class="actions two"><button type="button" class="btn plain" data-act="close">Cancel</button><button type="button" class="btn plain" data-act="gitem-del" style="color:var(--out)">Remove from list</button></div></div></form>`;
+  }
+  if (s.type === "sections") {
+    const list = (kind, arr, ph) => arr.map((l, i) => `<div class="spaceRow"><input id="${kind}${i}" value="${esc(l.name)}" aria-label="${kind === "se" ? "Section" : "Store"} name" maxlength="30" placeholder="${ph}">
+        <button type="button" class="x" data-act="ss-up" data-k="${kind}" data-i="${i}" aria-label="Move up" ${i ? "" : "disabled"}>↑</button>
+        <button type="button" class="x" data-act="ss-del" data-k="${kind}" data-i="${i}" aria-label="Remove ${esc(l.name)}" ${kind === "se" && arr.length < 2 ? "disabled" : ""}>×</button></div>`).join("");
+    body = `<h2>Sections &amp; stores</h2><div class="meta">Your list is grouped by store, then by section, in this order. Put sections in the order you walk the store.</div>
+      <form data-form="sections">
+      <div class="section-h" style="margin-top:6px"><h2>Stores</h2></div>
+      ${s.stores.length ? list("st", s.stores, "Store name") : `<p class="hint" style="margin:0 0 8px">No stores yet. Add one to split your list by store, like Costco and Trader Joe's.</p>`}
+      <button type="button" class="btn small ghost" data-act="ss-add" data-k="st" style="margin-bottom:14px">+ Add a store</button>
+      <div class="section-h"><h2>Sections</h2></div>
+      ${list("se", s.secs, "Section name")}
+      <button type="button" class="btn small ghost" data-act="ss-add" data-k="se" style="margin-bottom:14px">+ Add a section</button>
+      <p class="hint">Removing a section moves its items to Other. Removing a store moves its items to Any store.</p>
+      <div class="actions"><button class="btn" type="submit">Save</button><button class="btn plain" type="button" data-act="close">Cancel</button></div></form>`;
+  }
   if (s.type === "spaces") {
     body = `<h2>Storage spaces</h2><div class="meta">Rename, add, reorder or remove the places you keep food. Items in a removed space move to the first one.</div>
       <form data-form="spaces">${s.list.map((l,i) => `<div class="spaceRow"><input id="sp${i}" value="${esc(l.name)}" aria-label="Space name" maxlength="30">
@@ -2209,7 +2303,7 @@ document.addEventListener("submit", e => {
   if (f === "grocery" || f === "pantry") {
     const inp = f === "grocery" ? $("#gAdd") : $("#pAdd");
     const p = parseLine(inp.value); if (!p.name) return;
-    if (f === "grocery") { addToGrocery([p]); commit(); }
+    if (f === "grocery") { const st = ui.listStore && ui.listStore !== "all" ? ui.listStore : undefined; addToGrocery([st ? {...p, store: st} : p]); commit(); }
     else {
       const ex = state.pantry.find(x => norm(x.name) === norm(p.name));
       if (ex && (ex.unit === p.unit || ex.qty <= 0)) { ex.qty = (ex.qty>0?ex.qty:0) + p.qty; ex.unit = p.unit; }
@@ -2242,10 +2336,13 @@ document.addEventListener("submit", e => {
     const s = ui.sheet, m = LIB.menus[s.id], ws = new Date($("#luWeek").value + "T12:00:00");
     const o = {weekStart: mondayOf(ws), plan: $("#luPlan").checked, startDay: +$("#luDay").value, meal: $("#luMeal").value, grocery: $("#luGroc").checked,
       staples: !!($("#luStaples") && $("#luStaples").checked), ignorePantry: !!($("#luSkip") && !$("#luSkip").checked), prep: !!($("#luPrep") && $("#luPrep").checked), components: !!($("#luComp") && $("#luComp").checked)};
+    const run = () => {
     undoSnap = clone(state);
     const res = useMenu(m, o);
     ui.sheet = null; ui.tab = "plan"; ui.weekStart = o.weekStart; window.scrollTo(0, 0);
     commit(); toast([`${m.name} added`, res.planned ? `${res.planned} meals planned` : "", res.groc ? `${res.groc} on your list` : "", res.inStock ? `${res.inStock} already in stock` : "", res.prep ? `${res.prep} prep steps` : "", res.comps ? `${res.comps} sauces & components linked` : ""].filter(Boolean).join(" · "), true);
+    };
+    if (o.grocery) askStores(ymd(o.weekStart), run); else run();
     return;
   }
   if (f === "share") { startSharing($("#shareEmail").value); return; }
@@ -2255,6 +2352,38 @@ document.addEventListener("submit", e => {
     commit(`Saved "${name}"`); return;
   }
   if (f === "timer") { const m = +$("#tmMin").value; if (m > 0) { startTimer(`${m} min timer`, m); $("#tmMin").value = ""; } return; }
+  if (f === "newstore") {
+    const n = $("#nsName").value.trim(); if (!n) return;
+    let st = state.stores.find(x => x.name.toLowerCase() === n.toLowerCase());
+    if (!st) { st = {id: "store-" + uid(), name: n}; state.stores.push(st); }
+    if (ui.sheet && ui.sheet.sel && !ui.sheet.sel.includes(st.id)) ui.sheet.sel.push(st.id);
+    commit(); return;
+  }
+  if (f === "gitem") {
+    const g = state.grocery.find(x => x.id === ui.sheet.id); if (!g) return;
+    let sec = $("#giSec").value, store = $("#giStore").value;
+    if (sec === "__new") { const n = $("#giSecNew").value.trim(); if (!n) { $("#giSecNew").focus(); return; } const ex = state.sections.find(x => x.name.toLowerCase() === n.toLowerCase()); sec = ex ? ex.id : ("sec-" + uid()); if (!ex) state.sections.splice(Math.max(0, state.sections.length - 1), 0, {id: sec, name: n}); }
+    if (store === "__new") { const n = $("#giStoreNew").value.trim(); if (!n) { $("#giStoreNew").focus(); return; } const ex = state.stores.find(x => x.name.toLowerCase() === n.toLowerCase()); store = ex ? ex.id : ("store-" + uid()); if (!ex) state.stores.push({id: store, name: n}); }
+    const oldKey = norm(g.name);
+    g.name = $("#giName").value.trim() || g.name; g.qty = Math.max(0, +$("#giQty").value || 0) || 1;
+    const u = $("#giUnit").value.trim(); g.unit = UNIT_ALIASES[u.toLowerCase()] || u;
+    g.sec = sec; g.store = store; g.note = $("#giNote").value.trim(); if (!g.note) delete g.note;
+    if ($("#giRemember").checked) { state.itemPrefs[norm(g.name)] = {sec, store}; if (oldKey !== norm(g.name)) delete state.itemPrefs[oldKey]; }
+    ui.sheet = null; commit("Saved"); return;
+  }
+  if (f === "sections") {
+    const s = ui.sheet; captureSS(s);
+    const secs = s.secs.map(x => ({...x, name: x.name.trim()})).filter(x => x.name);
+    const stores = s.stores.map(x => ({...x, name: x.name.trim()})).filter(x => x.name);
+    if (!secs.length) return;
+    const secIds = new Set(secs.map(x => x.id)), storeIds = new Set(stores.map(x => x.id));
+    const fallback = (secs.find(x => x.id === "other") || secs[secs.length - 1]).id;
+    state.sections = secs; state.stores = stores;
+    state.grocery.forEach(g => { if (!secIds.has(g.sec)) g.sec = fallback; if (g.store && !storeIds.has(g.store)) g.store = ""; });
+    for (const [k, v] of Object.entries(state.itemPrefs)) { if (v.sec && !secIds.has(v.sec)) v.sec = ""; if (v.store && !storeIds.has(v.store)) v.store = ""; }
+    if (ui.listStore && ui.listStore !== "all" && !storeIds.has(ui.listStore)) ui.listStore = "all";
+    ui.sheet = null; commit("Sections and stores saved"); return;
+  }
   if (f === "item") {
     const p = state.pantry.find(x => x.id === ui.sheet.id); if (!p) return;
     p.name = $("#iName").value.trim() || p.name; p.qty = Math.max(0, +$("#iQty").value || 0); p.unit = UNIT_ALIASES[$("#iUnit").value.trim().toLowerCase()] || $("#iUnit").value.trim();
@@ -2301,8 +2430,11 @@ document.addEventListener("input", e => {
 });
 document.addEventListener("change", e => {
   if (e.target.id === "cookLoc" && ui.sheet) ui.sheet.ploc = e.target.value;
+  if (e.target.id === "giSec") { const w = $("#giSecNewWrap"); w.hidden = e.target.value !== "__new"; if (!w.hidden) $("#giSecNew").focus(); }
+  if (e.target.id === "giStore") { const w = $("#giStoreNewWrap"); w.hidden = e.target.value !== "__new"; if (!w.hidden) $("#giStoreNew").focus(); }
   if (e.target.id === "rNotes") { const r = recipeById(e.target.dataset.id); if (r && (r.notes || "") !== e.target.value) { r.notes = e.target.value; quietSave(); } }
 });
+function captureSS(s){ s.secs.forEach((l, i) => { const el = document.getElementById("se" + i); if (el) l.name = el.value; }); s.stores.forEach((l, i) => { const el = document.getElementById("st" + i); if (el) l.name = el.value; }); }
 function captureSpaces(s){ s.list.forEach((l, i) => { const el = document.getElementById("sp" + i); if (el) l.name = el.value; }); }
 
 document.addEventListener("click", e => {
@@ -2325,6 +2457,15 @@ document.addEventListener("click", e => {
       const snap = clone(state);
       setTimeout(() => { moveToPantry(g); undoSnap = snap; commit(); toast(`${g.name} moved to pantry`, true); }, 320);
       break; }
+    case "gitem": openSheet({type: "gitem", id}); break;
+    case "pick-shop": askStores(weekKey(), () => { commit(); }); break;
+    case "g-store": { const g = state.grocery.find(x => x.id === id); if (!g) break; g.store = el.dataset.v; state.itemPrefs[norm(g.name)] = {...(state.itemPrefs[norm(g.name)] || {}), sec: g.sec, store: g.store}; commit(); break; }
+    case "gitem-del": { undoSnap = clone(state); state.grocery = state.grocery.filter(x => x.id !== s.id); ui.sheet = null; commit(); toast("Removed from list", true); break; }
+    case "list-store": ui.listStore = el.dataset.v; render(); break;
+    case "sections": openSheet({type: "sections", secs: clone(state.sections), stores: clone(state.stores)}); break;
+    case "ss-add": { captureSS(s); const arr = el.dataset.k === "se" ? s.secs : s.stores; arr.push({id: (el.dataset.k === "se" ? "sec-" : "store-") + uid(), name: ""}); renderSheet(); const inp = document.getElementById(el.dataset.k + (arr.length - 1)); inp && inp.focus(); break; }
+    case "ss-del": { captureSS(s); const arr = el.dataset.k === "se" ? s.secs : s.stores; arr.splice(+el.dataset.i, 1); renderSheet(); break; }
+    case "ss-up": { captureSS(s); const arr = el.dataset.k === "se" ? s.secs : s.stores, i = +el.dataset.i; if (i > 0) [arr[i - 1], arr[i]] = [arr[i], arr[i - 1]]; renderSheet(); break; }
     case "del-g": state.grocery = state.grocery.filter(x => x.id !== id); commit(); break;
     case "inc": case "dec": {
       const p = state.pantry.find(x => x.id === id); const st = stepFor(p.unit);
@@ -2520,7 +2661,16 @@ document.addEventListener("click", e => {
       const done = ok => { s.msg = ok ? "Copied. Paste it into MacroFactor." : "Your browser blocked copying. Select the card text and copy it."; renderSheet(); };
       try { navigator.clipboard.writeText(text).then(() => done(true), () => done(false)); } catch { done(false); }
       break; }
-    case "shop-week": {
+    case "shop-week": askStores(weekKey(), () => shopWeek()); break;
+    case "shop-where-sel": { const v = el.dataset.v; s.sel = el.checked ? [...new Set([...s.sel, v])] : s.sel.filter(x => x !== v); renderSheet(); break; }
+    case "shop-where-go": case "shop-where-skip": {
+      const sel = a === "shop-where-skip" ? [] : s.sel.filter(id => state.stores.some(x => x.id === id));
+      state.shopStores = sel; // skipping clears it, so nothing is sorted automatically
+      const then = s.then; ui.sheet = null; renderSheet(); withStores(sel, then); break; }
+  }
+});
+function shopWeek(){
+  {
       const need = {}, count = {};
       for (const x of weekItems()) if (!x.it.done) count[x.r.id] = (count[x.r.id] || 0) + 1;
       for (const [rid, n] of Object.entries(count)) {
@@ -2532,10 +2682,9 @@ document.addEventListener("click", e => {
         if (!p || p.qty <= 0) short.push(n);
         else { const have = convert(p.qty, p.unit, n.unit, n.name); if (have != null && have < n.qty) short.push({...n, qty: Math.round((n.qty - have)*100)/100}); } }
       const before = clone(state); const added = addToGrocery(short);
-      if (!short.length) { toast("You have everything for this week's meals"); break; }
-      undoSnap = before; commit(); toast(`${added || short.length} item${(added||short.length)===1?"":"s"} added to your list`, true); break; }
-  }
-});
+      if (!short.length) { toast("You have everything for this week's meals"); return; }
+      undoSnap = before; ui.tab = "list"; ui.listStore = "all"; window.scrollTo(0, 0); commit(); toast(`${added || short.length} item${(added||short.length)===1?"":"s"} added to your list`, true); }
+}
 
 /* ---------- boot + sync ---------- */
 const SDK = "https://www.gstatic.com/firebasejs/10.12.2/";

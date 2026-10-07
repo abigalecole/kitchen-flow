@@ -1,6 +1,6 @@
 // Kitchen Flow service worker: makes the app open offline.
 // Change VERSION whenever you upload a new index.html so phones pick it up.
-const VERSION = "kf-1.5.5";
+const VERSION = "kf-1.6";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./firebase-config.js",
   "./icons/icon-192.png", "./icons/icon-512.png", "./icons/apple-touch-icon.png"];
 const CDN = ["www.gstatic.com", "fonts.googleapis.com", "fonts.gstatic.com", "cdnjs.cloudflare.com"];
